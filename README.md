@@ -45,10 +45,15 @@ Browser ──HTTPS──> Pufflet (Next.js) ──Bot API──> your private T
 - 🔑 REST API (`/api/v1`) with scoped API tokens: `read`, `write`, `delete`,
   `admin` — shown once at creation, stored as SHA-256 hashes, revocable, expirable
 - 🧾 Audit log, structured logs with secret redaction, health endpoint at `/api/health`
-- 🖥️ **Bundled Local Bot API server** — `docker compose up -d` starts the official
-  [telegram-bot-api](https://github.com/tdlib/telegram-bot-api) server as a
-  sidecar and points Pufflet at it, unlocking 2000 MB uploads/downloads with
-  zero manual setup
+- 🖥️ **Bundled Local Bot API server** — the official
+  [telegram-bot-api](https://github.com/tdlib/telegram-bot-api) server ships inside
+  the Docker image (or as a compose sidecar) and unlocks 2000 MB uploads/downloads
+  with zero manual setup
+- 🛟 **Self-healing state backup** — the file index is snapshotted into ONE pinned
+  Telegram document, refreshed automatically after changes, and auto-restored on
+  boot. Free ephemeral hosts (Hugging Face Spaces, Render, Koyeb) therefore survive
+  restarts with zero data loss. Monitor it and trigger "Back up now" in
+  Settings → Data safety
 - ✅ Automated tests: unit tests (crypto, tokens, folder cycles, multipart,
   Telegram adapter with mocked fetch) + end-to-end API suite (runs against a
   local mock Telegram Bot API — no real credentials needed)
@@ -111,7 +116,8 @@ bun run dev            # http://localhost:3000
 
 1. Message **@BotFather** → `/newbot` → save the token into `TELEGRAM_BOT_TOKEN`.
 2. Create a **private** channel (e.g. "Pufflet Storage") and add your bot as an
-   **administrator** with *post messages* + *delete messages* rights.
+   **administrator** with *post messages* + *delete messages* + *pin messages* rights
+   (pinning is needed for the state snapshot — see *Deploying → State backup*).
 3. Post any message in the channel, then open
    `https://api.telegram.org/bot<TOKEN>/getUpdates` and copy `chat.id`
    into `TELEGRAM_CHAT_ID` (channels are typically `-100…`).
@@ -133,26 +139,106 @@ Telegram credentials out of automated tests.
 
 ## Deploying
 
-### Option A — Docker with the bundled Local Bot API server (recommended)
+**No VPS required.** Option A (Vercel) and Option B (Hugging Face Spaces) are both
+free and need nothing but a browser and your Telegram credentials.
 
-One command gives you the app **plus** the official Local Bot API server as a
-sidecar — uploads and downloads up to **2000 MB per file**, no manual
-installation:
+### Option A — Vercel (serverless, ~10 minutes, free)
+
+Works today with honest limits: serverless functions cap the request body at
+**~4.5 MB**, so uploads are limited to ≈4 MB per file (`MAX_UPLOAD_MB=4`), and
+downloads follow the hosted Bot API's 20 MB `getFile` cap. The self-hosted
+Local Bot API server **cannot** run on Vercel — serverless has no long-running
+processes or persistent disk — so the 2000 MB mode is a platform
+impossibility there, not a Pufflet limitation. Need bigger files? Use Option B.
+
+1. **Database** — create a free Postgres at [neon.tech](https://neon.tech)
+   (or Vercel Postgres) and copy the connection string.
+2. **Schema** — push it once from your machine:
+   ```bash
+   DATABASE_URL="postgresql://user:pass@host/db?sslmode=require" \
+     npx prisma db push --schema prisma/schema.postgres.prisma
+   ```
+3. **Import** — vercel.com → *Add New → Project* → import this GitHub repo.
+   The framework auto-detects Next.js; `vercel.json` already sets the correct
+   build command (generates the Prisma client from the Postgres schema).
+4. **Environment variables** (Project → Settings → Environment Variables):
+
+   | Variable | Value |
+   |---|---|
+   | `DATABASE_URL` | your Postgres connection string (`?sslmode=require`) |
+   | `TELEGRAM_BOT_TOKEN` | your bot token |
+   | `TELEGRAM_CHAT_ID` | your storage channel id |
+   | `MAX_UPLOAD_MB` | `4` (Vercel body cap) |
+   | `MAX_DOWNLOAD_MB` | `20` (hosted `getFile` cap) |
+   | `STATE_BACKUP` | `false` (Postgres already persists; snapshots add nothing here) |
+   | `SEED_DEFAULT_USER` | `true` (default) — seeds `pufflet@pufflet.com` / `pufflet` |
+
+5. **Deploy** → open the URL → sign in with the seeded account
+   (`pufflet@pufflet.com` / `pufflet`) → **change the password immediately** in
+   Settings → Account (the login screen shows the hint until you do).
+
+### Option B — Hugging Face Spaces (FREE, no VPS, 2000 MB)
+
+One free Space (2 vCPU / 16 GB RAM, Docker SDK) runs the **all-in-one image**:
+the Next.js app *plus* the official Local Bot API server in the same container.
+Free Spaces sleep after ~48 h of inactivity and wipe their disk on every
+restart — Pufflet's **state backup** (below) restores everything automatically
+within seconds of waking up.
+
+1. **Telegram prep** (same as the Quick start): bot token via @BotFather, a
+   private storage channel where the bot is admin with post + delete + **pin**
+   rights, and `api_id` + `api_hash` from
+   [my.telegram.org](https://my.telegram.org) → *API development tools*.
+2. **One-time migration** (from your machine, with `TELEGRAM_BOT_TOKEN` in `.env`):
+   ```bash
+   npm run tg:logout
+   ```
+   Telegram requires bots to log out of the hosted API before talking to a
+   Local Bot API server. ⚠️ Hosted-issued `file_id`s stop working after this —
+   do it before uploading anything you care about through local mode.
+3. **Create the Space** — huggingface.co → *New Space* → name it → SDK:
+   **Docker** → Blank template → clone the Space repo and copy this project's
+   files in. Keep/paste this front matter at the very top of the Space's
+   `README.md` (it configures the Docker runtime):
+   ```yaml
+   ---
+   title: Pufflet
+   emoji: ☁️
+   colorFrom: blue
+   colorTo: indigo
+   sdk: docker
+   app_port: 7860
+   ---
+   ```
+4. **Secrets** — Space → *Settings → Variables and secrets* → add
+   `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`, `TELEGRAM_API_ID`,
+   `TELEGRAM_API_HASH` (as *secrets*). The entrypoint detects the API
+   id/hash, starts the embedded Local Bot API server, and raises both limits
+   to 2000 MB automatically.
+5. **Open your Space** → sign in `pufflet@pufflet.com` / `pufflet` → change the
+   password immediately (a free Space URL is public; your login is the gate).
+6. Upload something, then Settings → Data safety → **Back up now** to pin the
+   first snapshot (after that, flushing is automatic).
+
+Notes:
+
+- Restarted/slept Spaces auto-restore from the pinned snapshot — never delete
+  or unpin the `pufflet-state-backup.json` message in your storage chat.
+- First build takes ~5–10 minutes; later restarts are seconds.
+- Prefer a different free host? Render / Koyeb run the same image (set
+  `PORT` accordingly); everything behaves identically.
+
+### Option C — Any Docker host (VPS, home server, Railway, Render paid)
 
 ```bash
-# 1. configure — fill in TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID,
-#    and the two values below from https://my.telegram.org -> API tools
-cp .env.example .env
-#    TELEGRAM_API_ID=...      TELEGRAM_API_HASH=...
-
-# 2. ONE-TIME: log the bot out of the hosted Bot API (Telegram requires this
-#    before it will talk to a Local Bot API server)
-npm run tg:logout
-
-# 3. launch the stack (app on :3000 + bot-api sidecar)
+# compose stack: app + Local Bot API sidecar (2000 MB), port 3000
+cp .env.example .env   # fill in TOKEN, CHAT_ID, API_ID, API_HASH
+npm run tg:logout      # one-time hosted->local migration (see caveats above)
 docker compose up -d
 
-# 4. sign in -> pufflet@pufflet.com / pufflet -> change it in Settings -> Account
+# or the single all-in-one container (embedded bot-api, port 7860)
+docker build -t pufflet .
+docker run -p 3000:7860 --env-file .env pufflet
 ```
 
 Notes:
@@ -165,53 +251,36 @@ Notes:
 - To go back to hosted mode: remove `TELEGRAM_API_BASE`/`TELEGRAM_API_ID`/
   `TELEGRAM_API_HASH` overrides and re-deploy — the bot keeps working hosted
   (new uploads get new hosted `file_id`s).
-- Run it on any VPS/Raspberry Pi/home server with Docker — that is where the
-  2000 MB limits actually make sense (uploads flow through the server).
 
-### Option B — Vercel (serverless)
+### State backup (how the self-healing works)
 
-Vercel works, with honest caveats: serverless functions cap the request body at
-**~4.5 MB** (so uploads are limited to ≈4 MB per file regardless of
-`MAX_UPLOAD_MB`), functions have execution time limits, and there is no
-persistent disk — so PostgreSQL (e.g. Vercel Postgres / Neon) replaces SQLite.
-For the full 2000 MB experience use Option A.
+Pufflet's *index* (users, folders, file records, API keys) lives in a local
+database; the file bytes live in your Telegram channel. On hosts without a
+persistent disk, the database would vanish on every restart — so Pufflet keeps
+a **JSON snapshot of the index pinned as a document inside your own storage
+chat**:
 
-```bash
-# 1. create a Postgres database (Vercel Postgres or Neon) and note the URL
-
-# 2. push the schema to it (once, from your machine):
-DATABASE_URL="postgresql://…" npx prisma db push --schema prisma/schema.postgres.prisma
-
-# 3. import the repo on vercel.com (framework auto-detects Next.js).
-#    vercel.json already sets the right build command (generates the Prisma
-#    client from the postgres schema).
-```
-
-Environment variables to set in the Vercel dashboard:
-
-| Variable | Value |
-|---|---|
-| `DATABASE_URL` | your Postgres connection string (`?sslmode=require`) |
-| `TELEGRAM_BOT_TOKEN` | your bot token |
-| `TELEGRAM_CHAT_ID` | your storage channel id |
-| `TELEGRAM_API_BASE` | leave unset (hosted) |
-| `MAX_UPLOAD_MB` | `4` (Vercel body cap) |
-| `MAX_DOWNLOAD_MB` | `20` (hosted `getFile` cap) |
-| `SEED_DEFAULT_USER` | `true` (default) — seeds `pufflet@pufflet.com` / `pufflet` |
-
-> The seeded default account is what makes Vercel deploys zero-touch — there is
-> no interactive setup wizard on a serverless host. Change the password
-> immediately in **Settings → Account** (or set `SEED_DEFAULT_USER="false"`,
-> then run the setup screen once).
+- After any change (upload, rename, move, trash, key create, password change…)
+  the snapshot is re-uploaded — always into the **same message** via
+  `editMessageMedia`, so it never spams the chat.
+- On boot, if the database is empty (fresh container), Pufflet reads
+  `getChat` → `pinned_message`, downloads the snapshot and restores the index
+  in one transaction. Telegram messages themselves are never touched, so every
+  file keeps working.
+- Sessions/audit/upload-jobs are intentionally not snapshotted (transient).
+- The snapshot contains password and API-key hashes — one more reason the
+  storage chat must stay private.
+- Disable with `STATE_BACKUP="false"` (recommended on Vercel, where a hosted
+  Postgres already persists). Interval is `STATE_BACKUP_INTERVAL_MS`
+  (default 60 s). Status + manual "Back up now": Settings → Data safety.
 
 ### Any host (bare Node/Bun)
 
 - Build with `npm run build && npm run start` (or run `bun run dev` behind a
   reverse proxy for personal use). Set `NODE_ENV=production` so session cookies
   are `Secure`.
-- **Backups:** schedule `pg_dump`/file-copy of the metadata DB. This backs up the
-  *index only* — the bytes live in your Telegram channel, so enable Telegram's
-  own export/archival strategy for durability.
+- **Backups:** the state snapshot covers the index automatically; for extra
+  safety schedule `pg_dump`/file-copy of the metadata DB as well.
 - **Reconciliation:** if a Telegram delete succeeds but the process dies before
   the DB update, the file row will fail on the next purge attempt with the exact
   Telegram error — delete it again once fixed. Failed upload jobs are visible in
@@ -234,11 +303,14 @@ Environment variables to set in the Vercel dashboard:
 ```
 src/app/                    Next.js App Router: page + API routes
 src/app/api/v1/             versioned REST API (token auth)
+src/app/api/backup/         state snapshot status + manual flush (session auth)
 src/components/pufflet/     UI (store, file list, dialogs, settings, logo)
 src/lib/                    services: files, telegram adapter, auth, seed, crypto, …
+src/lib/state-backup.ts     pinned-document index snapshot/restore engine
+src/instrumentation.ts      boot hook: auto-restore + auto-backup timer
 prisma/schema.prisma        data model (SQLite default; Postgres variant in schema.postgres.prisma)
-Dockerfile                  production image (standalone build + boot-time db push)
-docker-compose.yml          app + bundled Local Bot API server (2000 MB)
+Dockerfile                  ALL-IN-ONE image (app + embedded Local Bot API, port 7860)
+docker-compose.yml          app + Local Bot API sidecar variant (2000 MB)
 scripts/tg-logout.mjs       one-time hosted->local Bot API migration (npm run tg:logout)
 scripts/gen_logo.py         regenerates the SVG logo from the original design
 scripts/e2e_api_test.sh     end-to-end API test suite
@@ -253,6 +325,10 @@ vercel.json                 Vercel build command (postgres prisma client)
 - Single-node in-memory rate limiter (fine for personal use; swap for Redis when clustering)
 - Full-text *content* search is out of scope (filename + metadata search only)
 - The hosted Bot API's 20 MB download cap applies unless you self-host the Local
-  Bot API server
+  Bot API server; on Vercel uploads are additionally capped at ≈4 MB by the
+  serverless request body limit
 - Folder trash/restore uses shared timestamps: items trashed individually keep
   their own trash time and are not silently restored with the folder
+- The state snapshot assumes the bot has the *pin messages* admin right in the
+  storage chat — without it, backups upload but a fresh container cannot find
+  them (Settings → Data safety shows a clear warning instead)

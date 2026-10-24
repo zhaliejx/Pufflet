@@ -33,11 +33,30 @@ export interface StoredMessage {
   mimeType: string;
 }
 
+/** A document message pinned in the storage chat (state-backup pointer). */
+export interface PinnedDocumentInfo {
+  messageId: string;
+  fileId: string;
+  fileName: string;
+  fileSize?: number;
+}
+
 export interface TelegramClientLike {
   sendDocument(filename: string, contentType: string, stream: ReadableStream<Uint8Array>): Promise<StoredMessage>;
   openDownloadStream(fileId: string): Promise<{ body: ReadableStream<Uint8Array>; size: number }>;
   deleteMessage(chatId: string, messageId: string): Promise<void>;
   getMe(): Promise<{ id: number; username: string }>;
+  // Optional extras used by the state-backup module. Implemented by the real
+  // client; lightweight test mocks may omit them.
+  getChatPinnedDocument?(chatId: string): Promise<PinnedDocumentInfo | null>;
+  editMessageDocument?(
+    chatId: string,
+    messageId: string,
+    filename: string,
+    contentType: string,
+    stream: ReadableStream<Uint8Array>,
+  ): Promise<{ fileId: string; size: number }>;
+  pinChatMessage?(chatId: string, messageId: string): Promise<void>;
 }
 
 const RETRYABLE_CODES = new Set(["429", "500", "502", "503", "504"]);
@@ -47,17 +66,24 @@ async function sleep(ms: number) {
   return new Promise((r) => setTimeout(r, ms));
 }
 
-export function createTelegramClient(fetchImpl: typeof fetch = fetch): TelegramClientLike {
-  if (!isTelegramConfigured()) {
+/** Explicit overrides so tests can build a client without env coupling. */
+export interface TelegramClientOptions {
+  apiBase?: string;
+  botToken?: string;
+  chatId?: string;
+}
+
+export function createTelegramClient(fetchImpl: typeof fetch = fetch, opts: TelegramClientOptions = {}): TelegramClientLike {
+  const base = (opts.apiBase ?? config.telegramApiBase).replace(/\/+$/, "");
+  const token = opts.botToken ?? config.telegramBotToken;
+  const chatId = opts.chatId ?? config.telegramChatId;
+  if (!token || !chatId) {
     // Fail fast with a clear, secret-free error.
     throw new TelegramError(
       "Telegram storage is not configured (set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID)",
       "TG_NOT_CONFIGURED",
     );
   }
-  const base = config.telegramApiBase;
-  const token = config.telegramBotToken;
-  const chatId = config.telegramChatId;
 
   /** GET-style method call with query params + retry/backoff on transient faults. */
   async function callApi<T>(method: string, params: Record<string, string> = {}): Promise<T> {
@@ -171,6 +197,79 @@ export function createTelegramClient(fetchImpl: typeof fetch = fetch): TelegramC
       type Me = { id: number; username: string };
       const me = await callApi<Me>("getMe");
       return { id: me.id, username: me.username };
+    },
+
+    // --- state-backup extras ---------------------------------------------------
+
+    async getChatPinnedDocument(pinnedChatId) {
+      type ChatInfo = {
+        pinned_message?: {
+          message_id: number;
+          document?: { file_id: string; file_name?: string; file_size?: number };
+        };
+      };
+      const chat = await callApi<ChatInfo>("getChat", { chat_id: pinnedChatId ?? chatId });
+      const pinned = chat.pinned_message;
+      const doc = pinned?.document;
+      if (!pinned || !doc) return null;
+      return {
+        messageId: String(pinned.message_id),
+        fileId: doc.file_id,
+        fileName: doc.file_name ?? "",
+        fileSize: doc.file_size,
+      };
+    },
+
+    async editMessageDocument(editChatId, editMessageId, filename, contentType, stream) {
+      const boundary = randomBoundary();
+      const body = buildMultipartStream(
+        boundary,
+        {
+          chat_id: editChatId ?? chatId,
+          message_id: editMessageId,
+          media: JSON.stringify({ type: "document", media: "attach://pufflet_state" }),
+        },
+        {
+          name: "pufflet_state",
+          filename,
+          contentType: contentType || "application/octet-stream",
+          stream,
+        },
+      );
+      type EditResult = {
+        message_id: number;
+        document?: { file_id: string; file_size?: number };
+      };
+      const res = await fetchImpl(`${base}/bot${token}/editMessageMedia`, {
+        method: "POST",
+        headers: { "content-type": `multipart/form-data; boundary=${boundary}` },
+        body,
+        duplex: "half",
+      } as RequestInit);
+      const json = (await res.json().catch(() => null)) as
+        | { ok: boolean; result?: EditResult; error_code?: number; description?: string; parameters?: { retry_after?: number } }
+        | null;
+      if (!json?.ok || !json.result?.document) {
+        const code = String(json?.error_code ?? res.status);
+        throw new TelegramError(
+          json?.description ?? `editMessageMedia failed (${code})`,
+          code,
+          json?.parameters?.retry_after,
+          RETRYABLE_CODES.has(code),
+        );
+      }
+      return {
+        fileId: json.result.document.file_id,
+        size: json.result.document.file_size ?? 0,
+      };
+    },
+
+    async pinChatMessage(pinChatId, pinMessageId) {
+      await callApi("pinChatMessage", {
+        chat_id: pinChatId ?? chatId,
+        message_id: pinMessageId,
+        disable_notification: "true",
+      });
     },
   };
 }

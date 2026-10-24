@@ -15,6 +15,7 @@ import {
   CloudCheck,
   CloudOff,
   Copy,
+  DatabaseBackup,
   KeyRound,
   Plus,
   Server,
@@ -66,6 +67,16 @@ interface StatsResponse {
   };
 }
 
+interface BackupStatus {
+  enabled: boolean;
+  telegramConfigured: boolean;
+  intervalMs: number;
+  pendingChanges: boolean;
+  lastBackupAt: string | null;
+  lastBackupSize: number;
+  lastError: string | null;
+}
+
 interface Props {
   user: { id: string; email: string; name: string | null; mustChangePassword?: boolean };
 }
@@ -75,6 +86,8 @@ const SCOPES = ["read", "write", "delete", "admin"];
 export function SettingsPanel({ user }: Props) {
   const [keys, setKeys] = useState<KeyRow[]>([]);
   const [stats, setStats] = useState<StatsResponse | null>(null);
+  const [backup, setBackup] = useState<BackupStatus | null>(null);
+  const [backupBusy, setBackupBusy] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [newName, setNewName] = useState("");
   const [newScopes, setNewScopes] = useState<string[]>(["read"]);
@@ -90,12 +103,14 @@ export function SettingsPanel({ user }: Props) {
 
   const load = useCallback(async () => {
     try {
-      const [k, s] = await Promise.all([
+      const [k, s, b] = await Promise.all([
         apiCall<{ keys: KeyRow[] }>("/api/keys"),
         apiCall<StatsResponse>("/api/stats"),
+        apiCall<BackupStatus>("/api/backup"),
       ]);
       setKeys(k.keys);
       setStats(s);
+      setBackup(b);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not load settings");
     }
@@ -131,6 +146,20 @@ export function SettingsPanel({ user }: Props) {
       await load();
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Revoke failed");
+    }
+  }
+
+  async function backupNow() {
+    setBackupBusy(true);
+    try {
+      await apiCall("/api/backup/flush", { method: "POST" });
+      toast.success("Snapshot saved to your Telegram storage chat");
+      await load();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Backup failed");
+      await load();
+    } finally {
+      setBackupBusy(false);
     }
   }
 
@@ -295,6 +324,70 @@ export function SettingsPanel({ user }: Props) {
               : "Not configured. Set TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID in your environment (.env) and restart."}
           </CardDescription>
         </CardHeader>
+      </Card>
+
+      {/* Data safety / state backup */}
+      <Card className="rounded-2xl">
+        <CardHeader className="flex-row items-start justify-between space-y-0">
+          <div className="space-y-1.5">
+            <CardTitle className="font-brand text-[#283070] flex items-center gap-2">
+              <DatabaseBackup className="h-5 w-5" /> Data safety
+              {backup?.enabled && backup.telegramConfigured ? (
+                <Badge className="bg-emerald-100 text-emerald-800 border border-emerald-200 hover:bg-emerald-100">
+                  auto-backup on
+                </Badge>
+              ) : (
+                <Badge variant="secondary">auto-backup off</Badge>
+              )}
+              {backup?.pendingChanges && backup.enabled && backup.telegramConfigured && (
+                <Badge className="bg-amber-100 text-amber-900 border border-amber-300 hover:bg-amber-100">
+                  unsaved changes
+                </Badge>
+              )}
+            </CardTitle>
+            <CardDescription>
+              Pufflet snapshots its file index (users, folders, file records, API keys) into one pinned
+              document inside your Telegram storage chat and keeps it up to date
+              {backup ? ` every ${Math.round(backup.intervalMs / 1000)}s when there are changes` : ""}.
+              A fresh server finds that snapshot and restores automatically — this is what lets free
+              ephemeral hosts (Hugging Face Spaces, Render, Koyeb) survive restarts.
+            </CardDescription>
+          </div>
+          <Button
+            onClick={backupNow}
+            disabled={backupBusy || !backup?.enabled || !backup?.telegramConfigured}
+            className="pufflet-gradient text-white border-0 rounded-xl shrink-0"
+            size="sm"
+          >
+            <DatabaseBackup className="h-4 w-4" /> {backupBusy ? "Backing up…" : "Back up now"}
+          </Button>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="grid grid-cols-2 gap-3">
+            <div className="rounded-xl bg-muted/60 p-4">
+              <p className="text-xs text-muted-foreground">Last snapshot</p>
+              <p className="font-medium text-sm mt-1">
+                {backup?.lastBackupAt ? formatDate(backup.lastBackupAt) : "never"}
+              </p>
+            </div>
+            <div className="rounded-xl bg-muted/60 p-4">
+              <p className="text-xs text-muted-foreground">Snapshot size</p>
+              <p className="font-medium text-sm mt-1">
+                {backup?.lastBackupSize ? formatBytes(backup.lastBackupSize) : "—"}
+              </p>
+            </div>
+          </div>
+          {backup?.lastError && (
+            <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+              {backup.lastError}
+            </p>
+          )}
+          <p className="text-xs text-muted-foreground">
+            Do not delete or unpin the <code className="font-mono">pufflet-state-backup.json</code> message in
+            your storage chat — it is your index backup. The snapshot contains password/API-key hashes, so
+            keep the chat private (it already holds all your files).
+          </p>
+        </CardContent>
       </Card>
 
       {/* API keys */}

@@ -18,6 +18,10 @@
 #
 # First run seeds the default account pufflet@pufflet.com / pufflet (temporary)
 # — change the password in Settings -> Account. Disable via SEED_DEFAULT_USER=false.
+#
+# No VPS? This same image runs FREE on Hugging Face Spaces (Docker SDK) — the
+# app then enables its embedded Local Bot API server from two secrets.
+# See README "Deploying → Option A: Hugging Face Spaces (free, no VPS)".
 
 services:
   bot-api:
@@ -37,9 +41,13 @@ services:
     ports:
       - "3000:3000"
     environment:
+      # The image defaults to 7860 (Hugging Face Spaces convention)
+      PORT: "3000"
       # SQLite metadata DB (persisted in the named volume below)
       DATABASE_URL: file:/app/db/pufflet.db
-      # Talk to the bundled Local Bot API server instead of hosted Telegram
+      # Talk to the bundled Local Bot API server instead of hosted Telegram.
+      # (TELEGRAM_API_ID/HASH are intentionally NOT passed to the app, so the
+      # embedded server inside the image stays off — the sidecar below is used.)
       TELEGRAM_API_BASE: http://bot-api:8081
       # Local Bot API limits: 2000 MB both ways
       MAX_UPLOAD_MB: "2000"
@@ -47,6 +55,9 @@ services:
       TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
       TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
       SEED_DEFAULT_USER: ${SEED_DEFAULT_USER:-true}
+      # Index snapshots pinned in the storage chat (nice off-site backup even
+      # with a persistent volume; set "false" to rely on the volume alone)
+      STATE_BACKUP: ${STATE_BACKUP:-true}
     volumes:
       - pufflet-db:/app/db
     depends_on:

@@ -20,6 +20,7 @@ interface StoredDoc {
 const docs = new Map<string, StoredDoc>();
 let nextId = 100;
 let nextMsgId = 1000;
+let pinnedMessageId = 0;
 
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
@@ -50,11 +51,10 @@ async function readAll(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> 
   return out;
 }
 
-function parseMultipart(body: Uint8Array, boundary: string) {
+function parseMultipart(body: Uint8Array, boundary: string, partName = "document") {
   const text = new TextDecoder().decode(body);
-  const bIdx = text.indexOf(`--${boundary}`);
   // find the file part: content-disposition with filename=
-  const nameMatch = /name="document"; filename="([^"]+)"/.exec(text);
+  const nameMatch = new RegExp(`name="${partName}"; filename="([^"]+)"`).exec(text);
   const typeMatch = /Content-Type: ([^\r\n]+)/.exec(text.slice(text.indexOf(nameMatch?.[1] ?? "document")));
   if (!nameMatch) return null;
   // binary slice: locate the double CRLF after the file part headers
@@ -102,7 +102,7 @@ Bun.serve({
       const m = /boundary=(.+)$/.exec(ct);
       if (!m) return err(400, "no boundary");
       const body = await readAll(req.body as ReadableStream<Uint8Array>);
-      const parsed = parseMultipart(body, m[1]);
+      const parsed = parseMultipart(body, m[1], "document");
       if (!parsed) return err(400, "no document part");
       const file_id = `MOCKFILE_${nextId++}`;
       const message_id = nextMsgId++;
@@ -150,7 +150,79 @@ Bun.serve({
       for (const [fid, doc] of docs) {
         if (doc.message_id === message_id) docs.delete(fid);
       }
+      if (pinnedMessageId === message_id) pinnedMessageId = 0;
       return ok(true);
+    }
+
+    // --- state-backup extras -------------------------------------------------
+
+    if (req.method === "GET" && method === "getChat") {
+      const pinnedDoc = [...docs.values()].find((d) => d.message_id === pinnedMessageId);
+      return ok({
+        id: -1001234567890,
+        ...(pinnedDoc
+          ? {
+              pinned_message: {
+                message_id: pinnedDoc.message_id,
+                date: 1700000000,
+                document: {
+                  file_id: pinnedDoc.file_id,
+                  file_unique_id: pinnedDoc.file_unique_id,
+                  file_name: pinnedDoc.filename,
+                  mime_type: pinnedDoc.mime,
+                  file_size: pinnedDoc.size,
+                },
+              },
+            }
+          : {}),
+      });
+    }
+
+    if (req.method === "GET" && method === "pinChatMessage") {
+      const message_id = Number(url.searchParams.get("message_id"));
+      if (![...docs.values()].some((d) => d.message_id === message_id)) return err(400, "message not found (mock)");
+      pinnedMessageId = message_id;
+      return ok(true);
+    }
+
+    if (req.method === "POST" && method === "editMessageMedia") {
+      const ct = req.headers.get("content-type") ?? "";
+      const m = /boundary=(.+)$/.exec(ct);
+      if (!m) return err(400, "no boundary");
+      const body = await readAll(req.body as ReadableStream<Uint8Array>);
+      const text = new TextDecoder().decode(body);
+      const msgMatch = /name="message_id"\r?\n\r?\n(\d+)/.exec(text);
+      if (!msgMatch) return err(400, "no message_id");
+      const targetId = Number(msgMatch[1]);
+      const existing = [...docs.values()].find((d) => d.message_id === targetId);
+      if (!existing) return err(400, "message to edit not found (mock)");
+      const parsed = parseMultipart(body, m[1], "pufflet_state");
+      if (!parsed) return err(400, "no pufflet_state part");
+      // replace the document in place (same message_id, new file_id)
+      for (const [fid, doc] of docs) {
+        if (doc.message_id === targetId) docs.delete(fid);
+      }
+      const file_id = `MOCKFILE_${nextId++}`;
+      docs.set(file_id, {
+        file_id,
+        file_unique_id: `uniq_${file_id}`,
+        bytes: parsed.bytes,
+        size: parsed.bytes.byteLength,
+        filename: parsed.filename,
+        mime: parsed.mime,
+        message_id: targetId,
+      });
+      return ok({
+        message_id: targetId,
+        chat: { id: -1001234567890 },
+        document: {
+          file_id,
+          file_unique_id: `uniq_${file_id}`,
+          file_name: parsed.filename,
+          mime_type: parsed.mime,
+          file_size: parsed.bytes.byteLength,
+        },
+      });
     }
 
     return err(404, `mock: no route ${req.method} ${method}`);

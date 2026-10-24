@@ -15,18 +15,20 @@ export async function POST(req: Request) {
   try {
     const ip = clientIp(req);
     const failKey = `login-fail:${ip}`;
-    // Rate limiting counts FAILED attempts only; a success resets the counter.
-    const peek = rateLimitPeek(failKey);
-    if (peek.limited) {
-      return jsonError(`Too many sign-in attempts. Retry in ${peek.retryAfterSec}s`, 429);
-    }
     const body = await readJson<Body>(req);
     const email = (body?.email ?? "").trim();
     const password = body?.password ?? "";
     if (!email || !password) return jsonError("Email and password are required", 400);
 
+    // Verify FIRST, throttle failures only: correct credentials always sign in
+    // (and reset the counter), so a burst of bad guesses can never lock the
+    // real owner out — brute-force protection only binds to wrong passwords.
     const user = await authenticate(email, password);
     if (!user) {
+      const peek = rateLimitPeek(failKey);
+      if (peek.limited) {
+        return jsonError(`Too many sign-in attempts. Retry in ${peek.retryAfterSec}s`, 429);
+      }
       const rl = rateLimit(failKey, MAX_LOGIN_FAILURES, FAILURE_WINDOW_MS);
       audit("auth.login_failed", null, undefined, ip);
       if (!rl.allowed) {

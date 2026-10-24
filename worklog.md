@@ -57,3 +57,28 @@ Stage Summary:
 - Fresh instance is now zero-touch: sign in pufflet@pufflet.com/pufflet, change pw in Settings -> Account
 - 2000 MB mode = docker compose up -d (bot-api sidecar included in repo)
 - Committed & pushed to github.com/zhaliejx/Pufflet (main)
+
+---
+Task ID: 12
+Agent: main (Z.ai)
+Task: No-VPS run story — self-healing state backup to Telegram + all-in-one Docker image (embedded Local Bot API) + Vercel-first deploy docs
+
+Work Log:
+- New src/lib/state-backup.ts: serializes index (users/folders/files/apiKeys; sessions+jobs+audit excluded) into one pinned JSON document in the storage chat; flush reuses the SAME message via editMessageMedia (no chat spam), pins via pinChatMessage, falls back to fresh send if deleted; boot-time restoreIfEmpty() reads getChat -> pinned_message, downloads, restores in one transaction with ids preserved (folders linked in a second pass); ensureStateBoot() once-guarded per process; markStateDirty via audit() choke point (STATE_TRACKED set); auto flush timer (default 60s, unref'd, globalThis-guarded)
+- config: STATE_BACKUP (default true), STATE_BACKUP_INTERVAL_MS (default 60000)
+- telegram.ts: optional TelegramClientLike extras getChatPinnedDocument/editMessageDocument/pinChatMessage (real impl added; test mocks unaffected); createTelegramClient now accepts explicit {apiBase,botToken,chatId} overrides
+- Fixed latent test bug: unit suite's config singleton depended on bun auto-loaded .env + import order (telegram tests hit the mock service URL); telegram.test.ts now builds clients with explicit OPTS, no env fiddling
+- Boot wiring: src/instrumentation.ts register() + GET /api/auth/state both call ensureStateBoot (restore-if-empty then start timer, never throws)
+- New API: GET /api/backup (status), POST /api/backup/flush (session + 10/5min rate limit); Settings -> new "Data safety" card (auto-backup badge, unsaved-changes badge, last snapshot time/size, Back up now button, do-not-unpin warning, mobile-friendly)
+- Login limiter redesigned: verify credentials FIRST, throttle only failures (peek before counting); correct passwords always sign in and reset the bucket — a burst of wrong guesses can no longer lock the owner out (found via back-to-back e2e runs poisoning the bucket)
+- Dockerfile rewritten ALL-IN-ONE: bun:1-alpine builder (musl native deps) + aiogram/telegram-bot-api binary copied into node:22-alpine runner; entrypoint starts embedded bot-api on :8081 loopback ONLY when TELEGRAM_API_ID+HASH set (auto TELEGRAM_API_BASE/2000MB limits), waits via node fetch probe; PORT default 7860 (HF Spaces), user node (uid 1000); compose keeps sidecar mode (API_ID/HASH not passed to app) and sets PORT=3000 explicitly
+- telegram-mock: added getChat/pinChatMessage/editMessageMedia (multipart part "pufflet_state", message_id form-field parsing, in-place document replacement); parseMultipart generalized with part name param
+- e2e: new section 0 (idempotent bun -e seed of owner@pufflet.test — suite assumed a user that DB resets wipe), section 10 state backup (401 guard, flush, status, second-flush edits-in-place, pinned discoverability via mock getChat); per-run X-Forwarded-For IP so in-memory limiters never collide across runs; unique api-file-$RANDOM name
+- README Deploying rewritten: Option A Vercel (explicit Neon/schema/env steps, honest 4MB cap, STATE_BACKUP=false), Option B Hugging Face Spaces FREE no-VPS 2000MB (front-matter yaml, secrets, tg:logout caveat, sleep/restore behavior), Option C any Docker host; new "State backup" doc section; storage-channel setup now requires pin-messages right; .env.example force-added (was silently gitignored and never pushed!)
+- Verification: lint clean; 36/36 unit tests (new backup.test.ts: snapshot round-trip, version guards, applySnapshotData wipe-order/folder-link-order/date revival with fake tx); e2e 37/37 twice back-to-back; agent-browser: login -> Settings Data safety card renders (desktop+mobile), auto-backup already fired live ("1 min ago, 15.6 KB"), Back up now -> "Snapshot saved" toast, 429 path handled with clear message; no page errors
+
+Stage Summary:
+- Pufflet now survives ephemeral hosts: restart wipes disk -> boot restores index from the pinned Telegram snapshot in seconds
+- 2000 MB mode needs NO VPS: one free HF Space runs app + embedded Local Bot API from the same image
+- Vercel path documented and de-risked (login limiter fix + STATE_BACKUP=false guidance)
+- Committed & pushed to github.com/zhaliejx/Pufflet (main)
