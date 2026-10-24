@@ -31,6 +31,15 @@ export const config = {
   sessionTtlDays: intEnv("SESSION_TTL_DAYS", 30),
   sessionCookie: "pufflet_session",
 
+  // State backup ---------------------------------------------------------------
+  // Snapshots the metadata index (users, folders, files, API keys) into a
+  // pinned document inside the storage chat. On a fresh container Pufflet
+  // finds that pinned snapshot and restores it automatically — this is what
+  // makes free ephemeral hosts (Hugging Face Spaces, Render, Koyeb, ...)
+  // usable without a VPS. Disable with STATE_BACKUP="false".
+  stateBackupEnabled: process.env.STATE_BACKUP !== "false",
+  stateBackupIntervalMs: intEnv("STATE_BACKUP_INTERVAL_MS", 60_000),
+
   // API tokens ---------------------------------------------------------------
   apiKeyPrefix: "tc_live_",
 
