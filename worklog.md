@@ -82,3 +82,16 @@ Stage Summary:
 - 2000 MB mode needs NO VPS: one free HF Space runs app + embedded Local Bot API from the same image
 - Vercel path documented and de-risked (login limiter fix + STATE_BACKUP=false guidance)
 - Committed & pushed to github.com/zhaliejx/Pufflet (main)
+
+---
+Task ID: 13
+Agent: main (Z.ai)
+Task: Wire user-deployed remote Bot API server (Render) into Pufflet's Vercel deploy story
+
+Work Log:
+- User deployed their own self-hosted Bot API on Render (telegram-bot-api-cylx.onrender.com); probed it: root returns canonical bot-api 404 JSON, /bot<fake>/getMe returns 401 Unauthorized -> confirmed a live Local Bot API server
+- Confirmed Vercel platform facts via docs: 4.5 MB request-body cap (uploads ~4 MB regardless of backend), Fluid compute Hobby max duration 300s (downloads stream fine), Hobby 100GB data / 10GB origin transfer
+- Verified code paths need no changes: adapter builds downloads as {base}/file/bot<token>/<path> (requires --local on the server), USING_LOCAL_BOT_API auto-flips to "local (2000 MB)" when TELEGRAM_API_BASE != hosted, 120s callApi timeout absorbs Render cold starts
+- README: constraints table generalized (self-hosted server anywhere, not just bundled); Option A rewritten as "Vercel + your own Bot API server" (Render setup via aiogram/telegram-bot-api image + --local command, mandatory tg:logout step, env table with TELEGRAM_API_BASE + MAX_UPLOAD_MB=4 + MAX_DOWNLOAD_MB=2000, keep-awake pinger note, bandwidth budgets, security note); Option B now flagged as the free path for 2000 MB uploads; known-limitations bullet updated
+- .env.example: remote self-hosted TELEGRAM_API_BASE example; docker-compose.yml: fixed stale "Option A" README reference
+- lint clean, 36/36 unit tests pass; committed + pushed (token used in push URL only, remote kept clean)
