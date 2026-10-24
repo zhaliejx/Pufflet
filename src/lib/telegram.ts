@@ -9,7 +9,7 @@
 // The base URL is configurable so a self-hosted "Local Bot API" server
 // (2000 MB both directions) can be used without code changes.
 
-import { config, MAX_DOWNLOAD_BYTES, MAX_UPLOAD_BYTES, isTelegramConfigured } from "@/lib/config";
+import { config, MAX_DOWNLOAD_BYTES, MAX_UPLOAD_BYTES, isTelegramConfigured, USING_LOCAL_BOT_API } from "@/lib/config";
 import { buildMultipartStream, cappedStream, randomBoundary } from "@/lib/multipart";
 
 export class TelegramError extends Error {
@@ -186,17 +186,19 @@ export function telegram(): TelegramClientLike {
 export async function telegramStatus(): Promise<{
   configured: boolean;
   ok: boolean;
+  mode: "local" | "hosted";
   username?: string;
   chatIdMasked?: string;
   error?: string;
 }> {
-  if (!isTelegramConfigured()) return { configured: false, ok: false };
+  const mode = USING_LOCAL_BOT_API ? "local" : "hosted";
+  if (!isTelegramConfigured()) return { configured: false, ok: false, mode };
   const raw = String(config.telegramChatId);
   const masked = raw.length > 6 ? `${raw.slice(0, 3)}****${raw.slice(-3)}` : "****";
   try {
     const me = await telegram().getMe();
-    return { configured: true, ok: true, username: me.username, chatIdMasked: masked };
+    return { configured: true, ok: true, mode, username: me.username, chatIdMasked: masked };
   } catch (err) {
-    return { configured: true, ok: false, chatIdMasked: masked, error: String(err instanceof Error ? err.message : err) };
+    return { configured: true, ok: false, mode, chatIdMasked: masked, error: String(err instanceof Error ? err.message : err) };
   }
 }

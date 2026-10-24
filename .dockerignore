@@ -1,0 +1,21 @@
+# keep the build context small
+node_modules
+.next
+.git
+db
+download
+upload
+examples
+mini-services
+tests
+docs
+*.log
+dev.log
+server.log
+.env
+.env.*
+!.env.example
+.Dzscripts
+.zscripts
+.claude
+skills

@@ -1,11 +1,23 @@
 import { NextResponse } from "next/server";
 import { db } from "@/lib/db";
 import { getSessionUser } from "@/lib/auth";
+import { ensureDefaultUser, defaultUserActive } from "@/lib/seed";
 
 export async function GET() {
+  // First-run convenience: seed the default owner account (pufflet@pufflet.com
+  // with a temporary password) unless SEED_DEFAULT_USER="false".
+  await ensureDefaultUser();
   const user = await getSessionUser();
   return NextResponse.json({
     needsSetup: (await db.user.count()) === 0,
-    user: user ? { id: user.id, email: user.email, name: user.name } : null,
+    defaultUserActive: await defaultUserActive(),
+    user: user
+      ? {
+          id: user.id,
+          email: user.email,
+          name: user.name,
+          mustChangePassword: user.mustChangePassword,
+        }
+      : null,
   });
 }

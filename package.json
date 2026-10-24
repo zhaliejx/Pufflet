@@ -9,6 +9,7 @@
     "lint": "eslint .",
     "test": "bun test tests/unit/",
     "test:e2e": "bash scripts/e2e_api_test.sh",
+    "tg:logout": "node scripts/tg-logout.mjs",
     "db:push": "prisma db push --accept-data-loss",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",

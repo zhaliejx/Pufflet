@@ -6,6 +6,7 @@ export type AuditAction =
   | "auth.login"
   | "auth.logout"
   | "auth.login_failed"
+  | "auth.password_change"
   | "file.upload"
   | "file.upload_failed"
   | "file.rename"

@@ -10,7 +10,17 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { formatBytes, formatDate } from "@/lib/format";
 import { apiCall } from "./store";
 import { toast } from "sonner";
-import { CloudCheck, CloudOff, Copy, KeyRound, Plus, Trash2 } from "lucide-react";
+import {
+  BadgeCheck,
+  CloudCheck,
+  CloudOff,
+  Copy,
+  KeyRound,
+  Plus,
+  Server,
+  ShieldAlert,
+  Trash2,
+} from "lucide-react";
 import {
   Dialog,
   DialogContent,
@@ -49,15 +59,20 @@ interface StatsResponse {
   telegram: {
     configured: boolean;
     ok: boolean;
+    mode?: "local" | "hosted";
     username?: string;
     chatIdMasked?: string;
     error?: string;
   };
 }
 
+interface Props {
+  user: { id: string; email: string; name: string | null; mustChangePassword?: boolean };
+}
+
 const SCOPES = ["read", "write", "delete", "admin"];
 
-export function SettingsPanel() {
+export function SettingsPanel({ user }: Props) {
   const [keys, setKeys] = useState<KeyRow[]>([]);
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
@@ -66,6 +81,12 @@ export function SettingsPanel() {
   const [expiry, setExpiry] = useState("never");
   const [createdToken, setCreatedToken] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  // change-password form state
+  const [currentPw, setCurrentPw] = useState("");
+  const [newPw, setNewPw] = useState("");
+  const [confirmPw, setConfirmPw] = useState("");
+  const [pwBusy, setPwBusy] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -113,8 +134,106 @@ export function SettingsPanel() {
     }
   }
 
+  async function changePassword(e: React.FormEvent) {
+    e.preventDefault();
+    if (newPw.length < 8) {
+      toast.error("New password must be at least 8 characters");
+      return;
+    }
+    if (newPw !== confirmPw) {
+      toast.error("New passwords do not match");
+      return;
+    }
+    setPwBusy(true);
+    try {
+      await apiCall("/api/auth/change-password", {
+        method: "POST",
+        body: JSON.stringify({ currentPassword: currentPw, newPassword: newPw }),
+      });
+      toast.success("Password updated — other sessions were signed out");
+      // Reload so the app re-reads auth state (clears the temporary-password banner).
+      setTimeout(() => window.location.reload(), 600);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not change password");
+    } finally {
+      setPwBusy(false);
+    }
+  }
+
   return (
     <div className="space-y-6 max-w-3xl">
+      {/* Account / password */}
+      <Card className="rounded-2xl">
+        <CardHeader className="flex-row items-start justify-between space-y-0">
+          <div className="space-y-1.5">
+            <CardTitle className="font-brand text-[#283070] flex items-center gap-2">
+              <BadgeCheck className="h-5 w-5" /> Account
+            </CardTitle>
+            <CardDescription>
+              {user.email}
+              {user.name ? ` · ${user.name}` : ""} · owner account
+            </CardDescription>
+          </div>
+          {user.mustChangePassword && (
+            <Badge className="bg-amber-100 text-amber-900 border border-amber-300 hover:bg-amber-100 shrink-0">
+              <ShieldAlert className="h-3 w-3 mr-1" /> temporary password
+            </Badge>
+          )}
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={changePassword} className="grid sm:grid-cols-3 gap-3 items-end">
+            <div className="space-y-2">
+              <Label htmlFor="pw-current">Current password</Label>
+              <Input
+                id="pw-current"
+                type="password"
+                required
+                autoComplete="current-password"
+                value={currentPw}
+                onChange={(e) => setCurrentPw(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="pw-new">New password</Label>
+              <Input
+                id="pw-new"
+                type="password"
+                required
+                minLength={8}
+                autoComplete="new-password"
+                placeholder="At least 8 characters"
+                value={newPw}
+                onChange={(e) => setNewPw(e.target.value)}
+              />
+            </div>
+            <div className="space-y-2">
+              <Label htmlFor="pw-confirm">Confirm new password</Label>
+              <Input
+                id="pw-confirm"
+                type="password"
+                required
+                minLength={8}
+                autoComplete="new-password"
+                value={confirmPw}
+                onChange={(e) => setConfirmPw(e.target.value)}
+              />
+            </div>
+            <Button
+              type="submit"
+              disabled={pwBusy || !currentPw || !newPw || !confirmPw}
+              className="pufflet-gradient text-white border-0 rounded-xl sm:col-span-3 w-fit"
+            >
+              {pwBusy ? "Updating…" : "Update password"}
+            </Button>
+            <p className="sm:col-span-3 text-xs text-muted-foreground">
+              Updating your password signs out every other device and clears the temporary-password
+              flag. The default seeded account (pufflet@pufflet.com / pufflet) should do this right
+              after first sign-in.
+            </p>
+          </form>
+        </CardContent>
+      </Card>
+
       {/* Storage overview */}
       <Card className="rounded-2xl">
         <CardHeader>
@@ -136,7 +255,9 @@ export function SettingsPanel() {
           {stats && (
             <p className="col-span-2 sm:col-span-4 text-xs text-muted-foreground">
               Upload limit {stats.limits.maxUploadMb} MB · download limit {stats.limits.maxDownloadMb} MB per file
-              (hosted Telegram Bot API). Self-host the Local Bot API server to raise both to 2000 MB.
+              {stats.telegram.mode === "local"
+                ? " (Local Bot API server)"
+                : " (hosted Telegram Bot API). Run the bundled Local Bot API server — `docker compose up -d` — to raise both to 2000 MB."}
             </p>
           )}
         </CardContent>
@@ -152,6 +273,19 @@ export function SettingsPanel() {
               <CloudOff className="h-5 w-5 text-amber-500" />
             )}
             Telegram storage
+            {stats?.telegram.configured && (
+              <Badge
+                variant="secondary"
+                className={
+                  stats.telegram.mode === "local"
+                    ? "bg-emerald-100 text-emerald-800 border border-emerald-200"
+                    : ""
+                }
+              >
+                <Server className="h-3 w-3 mr-1" />
+                {stats.telegram.mode === "local" ? "Local Bot API · up to 2000 MB" : "Hosted Bot API · 50 MB"}
+              </Badge>
+            )}
           </CardTitle>
           <CardDescription>
             {stats?.telegram.configured

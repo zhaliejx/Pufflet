@@ -53,10 +53,11 @@ import {
   Menu,
   Loader2,
   CheckCircle2,
+  ShieldAlert,
 } from "lucide-react";
 
 interface Props {
-  user: { id: string; email: string; name: string | null };
+  user: { id: string; email: string; name: string | null; mustChangePassword?: boolean };
   onSignOut: () => void;
 }
 
@@ -319,6 +320,25 @@ export function DriveApp({ user, onSignOut }: Props) {
         </div>
       </header>
 
+      {/* temporary password nag — shown until the seeded default password is changed */}
+      {user.mustChangePassword && drive.view !== "settings" && (
+        <div className="border-b border-amber-200 bg-amber-50 px-4 py-2.5 text-sm text-amber-900 flex flex-wrap items-center gap-x-3 gap-y-1">
+          <ShieldAlert className="h-4 w-4 shrink-0" />
+          <span className="flex-1 min-w-[12rem]">
+            You are using the temporary default password. Change it now — anyone who knows it can
+            read your files.
+          </span>
+          <Button
+            size="sm"
+            variant="outline"
+            className="h-7 rounded-lg border-amber-300 bg-white text-amber-900 hover:bg-amber-100"
+            onClick={() => drive.setView("settings")}
+          >
+            Change password
+          </Button>
+        </div>
+      )}
+
       <div className="flex flex-1">
         {/* sidebar */}
         <aside
@@ -443,7 +463,7 @@ export function DriveApp({ user, onSignOut }: Props) {
           </div>
 
           {drive.view === "settings" ? (
-            <SettingsPanel />
+            <SettingsPanel user={user} />
           ) : (
             <FileList
               files={drive.files}

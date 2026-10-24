@@ -6,14 +6,16 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { toast } from "sonner";
-import { Loader2, Cloud } from "lucide-react";
+import { Loader2, Cloud, Sparkles } from "lucide-react";
 
 interface Props {
   needsSetup: boolean;
+  /** True while the seeded default account (pufflet@pufflet.com) still uses its temporary password. */
+  defaultUserActive?: boolean;
   onDone: () => void;
 }
 
-export function AuthScreen({ needsSetup, onDone }: Props) {
+export function AuthScreen({ needsSetup, defaultUserActive, onDone }: Props) {
   const [mode, setMode] = useState<"login" | "setup">(needsSetup ? "setup" : "login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -59,6 +61,18 @@ export function AuthScreen({ needsSetup, onDone }: Props) {
           </CardDescription>
         </CardHeader>
         <CardContent>
+          {mode === "login" && defaultUserActive && (
+            <div className="mb-4 rounded-xl border border-amber-200 bg-amber-50 p-3 text-xs text-amber-900">
+              <p className="flex items-center gap-1.5 font-medium">
+                <Sparkles className="h-3.5 w-3.5" /> First run?
+              </p>
+              <p className="mt-1">
+                Sign in with <code className="font-mono">pufflet@pufflet.com</code> and the temporary
+                password <code className="font-mono">pufflet</code> — you can change it in Settings →
+                Account right after.
+              </p>
+            </div>
+          )}
           <form onSubmit={submit} className="space-y-4">
             {mode === "setup" && (
               <div className="space-y-2">
@@ -90,7 +104,7 @@ export function AuthScreen({ needsSetup, onDone }: Props) {
                 id="password"
                 type="password"
                 required
-                minLength={8}
+                minLength={mode === "setup" ? 8 : undefined}
                 placeholder={mode === "setup" ? "At least 8 characters" : "••••••••"}
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}

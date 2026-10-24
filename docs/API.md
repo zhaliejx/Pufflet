@@ -113,3 +113,24 @@ Never put tokens in URLs, logs, or client-side code. Treat `tc_live_…` like a 
 The pages under `/api/*` (outside `/v1`) are for the website itself and use the
 httpOnly session cookie — same services underneath, not intended for scripts.
 Use `/api/v1` for programmatic access.
+
+### POST `/api/auth/change-password`
+
+Session-authenticated password change (used by **Settings → Account**):
+
+```json
+{ "currentPassword": "…", "newPassword": "…" }
+```
+
+- Requires the current session cookie; throttled per IP (10 / 15 min).
+- The new password must be 8–200 characters and different from the current one.
+- On success every **other** session is signed out; the current session stays
+  alive. Clears the `mustChangePassword` flag on the seeded default account
+  (`pufflet@pufflet.com` / temporary `pufflet`).
+
+### GET `/api/auth/state`
+
+Returns `{ needsSetup, defaultUserActive, user }` — `defaultUserActive` is true
+while the seeded default account still uses its temporary password (drives the
+first-run hint on the login screen), and `user.mustChangePassword` drives the
+in-app "temporary password" banner.

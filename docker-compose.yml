@@ -1,0 +1,57 @@
+# Pufflet — one-command production stack:
+#   app       this Next.js app (upload limit raised to 2000 MB)
+#   bot-api   bundled Telegram "Local Bot API" server (aiogram/telegram-bot-api)
+#
+# The Local Bot API server lifts Telegram's hosted limits from 50 MB up/20 MB
+# down to 2000 MB both ways — no code changes, the app just points
+# TELEGRAM_API_BASE at the sidecar below.
+#
+# One-time prerequisites:
+#   1. Get api_id + api_hash at https://my.telegram.org -> API development tools
+#   2. Put TELEGRAM_API_ID, TELEGRAM_API_HASH, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID
+#      in this directory's .env (see .env.example)
+#   3. Run `npm run tg:logout` ONCE (logOut from the hosted Bot API — Telegram
+#      requires this before a bot may talk to a Local Bot API server).
+#      Note: file_ids issued by the hosted API stop working after logOut;
+#      files uploaded before migration must be re-uploaded.
+#   4. docker compose up -d  ->  http://localhost:3000
+#
+# First run seeds the default account pufflet@pufflet.com / pufflet (temporary)
+# — change the password in Settings -> Account. Disable via SEED_DEFAULT_USER=false.
+
+services:
+  bot-api:
+    image: aiogram/telegram-bot-api:latest
+    restart: unless-stopped
+    command: >-
+      --api-id=${TELEGRAM_API_ID}
+      --api-hash=${TELEGRAM_API_HASH}
+      --local
+      --http-port=8081
+    volumes:
+      - bot-api-data:/var/lib/telegram-bot-api
+
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # SQLite metadata DB (persisted in the named volume below)
+      DATABASE_URL: file:/app/db/pufflet.db
+      # Talk to the bundled Local Bot API server instead of hosted Telegram
+      TELEGRAM_API_BASE: http://bot-api:8081
+      # Local Bot API limits: 2000 MB both ways
+      MAX_UPLOAD_MB: "2000"
+      MAX_DOWNLOAD_MB: "2000"
+      TELEGRAM_BOT_TOKEN: ${TELEGRAM_BOT_TOKEN}
+      TELEGRAM_CHAT_ID: ${TELEGRAM_CHAT_ID}
+      SEED_DEFAULT_USER: ${SEED_DEFAULT_USER:-true}
+    volumes:
+      - pufflet-db:/app/db
+    depends_on:
+      - bot-api
+
+volumes:
+  bot-api-data:
+  pufflet-db:

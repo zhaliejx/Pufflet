@@ -42,6 +42,10 @@ export const config = {
 export const MAX_UPLOAD_BYTES = config.maxUploadMb * 1024 * 1024;
 export const MAX_DOWNLOAD_BYTES = config.maxDownloadMb * 1024 * 1024;
 
+/** True when TELEGRAM_API_BASE points anywhere other than the hosted Bot API
+ *  (i.e. a self-hosted / docker-compose "Local Bot API" server). */
+export const USING_LOCAL_BOT_API = config.telegramApiBase !== "https://api.telegram.org";
+
 export function isTelegramConfigured(): boolean {
   return Boolean(config.telegramBotToken && config.telegramChatId);
 }

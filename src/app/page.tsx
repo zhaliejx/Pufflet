@@ -10,11 +10,13 @@ interface UserInfo {
   id: string;
   email: string;
   name: string | null;
+  mustChangePassword?: boolean;
 }
 
 export default function Page() {
   const [state, setState] = useState<"loading" | "anon" | "authed">("loading");
   const [needsSetup, setNeedsSetup] = useState(false);
+  const [defaultUserActive, setDefaultUserActive] = useState(false);
   const [user, setUser] = useState<UserInfo | null>(null);
 
   const loadState = async () => {
@@ -22,6 +24,7 @@ export default function Page() {
       const res = await fetch("/api/auth/state", { cache: "no-store" });
       const body = await res.json();
       setNeedsSetup(Boolean(body.needsSetup));
+      setDefaultUserActive(Boolean(body.defaultUserActive));
       setUser(body.user ?? null);
       setState(body.user ? "authed" : "anon");
     } catch {
@@ -36,6 +39,7 @@ export default function Page() {
       .then((body) => {
         if (cancelled) return;
         setNeedsSetup(Boolean(body.needsSetup));
+        setDefaultUserActive(Boolean(body.defaultUserActive));
         setUser(body.user ?? null);
         setState(body.user ? "authed" : "anon");
       })
@@ -60,7 +64,13 @@ export default function Page() {
   }
 
   if (state === "anon" || !user) {
-    return <AuthScreen needsSetup={needsSetup} onDone={() => void loadState()} />;
+    return (
+      <AuthScreen
+        needsSetup={needsSetup}
+        defaultUserActive={defaultUserActive}
+        onDone={() => void loadState()}
+      />
+    );
   }
 
   return <DriveApp user={user} onSignOut={() => void loadState()} />;

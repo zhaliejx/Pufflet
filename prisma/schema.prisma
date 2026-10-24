@@ -1,7 +1,7 @@
 // Pufflet — Telegram-backed personal cloud storage
-// SQLite build (default). To run on PostgreSQL, change the datasource provider
-// to "postgresql", point DATABASE_URL at your Postgres instance and run
-// `prisma migrate dev` — the schema itself is portable.
+// SQLite build (default). For serverless hosts (Vercel) use
+// prisma/schema.postgres.prisma — keep the two models in sync; the models here
+// are the source of truth and are portable across both providers.
 
 generator client {
   provider = "prisma-client-js"
@@ -13,13 +13,14 @@ datasource db {
 }
 
 model User {
-  id           String       @id @default(cuid())
-  email        String       @unique
-  name         String?
-  passwordHash String
-  role         String       @default("OWNER") // OWNER | MEMBER (multi-workspace ready)
-  createdAt    DateTime     @default(now())
-  updatedAt    DateTime     @updatedAt
+  id                  String       @id @default(cuid())
+  email               String       @unique
+  name                String?
+  passwordHash        String
+  role                String       @default("OWNER") // OWNER | MEMBER (multi-workspace ready)
+  mustChangePassword  Boolean      @default(false) // true for the seeded default account until the password is changed
+  createdAt           DateTime     @default(now())
+  updatedAt           DateTime     @updatedAt
 
   sessions    Session[]
   folders     Folder[]
