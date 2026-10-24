@@ -1,0 +1,137 @@
+// Pufflet — Telegram-backed personal cloud storage
+// SQLite build (default). To run on PostgreSQL, change the datasource provider
+// to "postgresql", point DATABASE_URL at your Postgres instance and run
+// `prisma migrate dev` — the schema itself is portable.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id           String       @id @default(cuid())
+  email        String       @unique
+  name         String?
+  passwordHash String
+  role         String       @default("OWNER") // OWNER | MEMBER (multi-workspace ready)
+  createdAt    DateTime     @default(now())
+  updatedAt    DateTime     @updatedAt
+
+  sessions    Session[]
+  folders     Folder[]
+  files       File[]
+  uploadJobs  UploadJob[]
+  apiKeys     ApiKey[]
+  auditEvents AuditEvent[]
+}
+
+model Session {
+  id        String   @id @default(cuid())
+  token     String   @unique // 48 random bytes, hex — raw token lives only in the cookie
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+}
+
+model Folder {
+  id        String    @id @default(cuid())
+  name      String
+  ownerId   String
+  owner     User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  parentId  String?
+  parent    Folder?   @relation("FolderTree", fields: [parentId], references: [id], onDelete: NoAction, onUpdate: NoAction)
+  children  Folder[]  @relation("FolderTree")
+  trashedAt DateTime?
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  files File[]
+
+  @@index([ownerId, parentId])
+  @@index([ownerId, trashedAt])
+}
+
+model File {
+  id             String    @id @default(cuid())
+  name           String // original filename (display)
+  normalizedName String // lowercased for case-insensitive search/sorting
+  size           Int // bytes (upload cap keeps this within Int32)
+  mimeType       String    @default("application/octet-stream")
+  status         String    @default("UPLOADING") // UPLOADING | READY | FAILED
+  starred        Boolean   @default(false)
+  ownerId        String
+  owner          User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  folderId       String?
+  folder         Folder?   @relation(fields: [folderId], references: [id], onDelete: SetNull)
+  trashedAt      DateTime?
+  sha256         String? // optional content checksum (never the Telegram file id)
+  uploaderLabel  String? // "web" or "api" provenance
+
+  // Telegram storage references — chat/message locate the stored message,
+  // file_id is a bot-scoped download handle, file_unique_id is an index key.
+  tgChatId       String?
+  tgMessageId    String?
+  tgFileId       String?
+  tgFileUniqueId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([ownerId, folderId, trashedAt])
+  @@index([ownerId, status])
+  @@index([ownerId, trashedAt, updatedAt])
+  @@index([normalizedName])
+  @@index([tgFileUniqueId])
+}
+
+model UploadJob {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  filename  String
+  size      Int
+  mimeType  String?
+  folderId  String?
+  status    String    @default("PENDING") // PENDING | UPLOADING | STORING | READY | FAILED | CANCELED
+  error     String?
+  fileId    String? // set when the job completes
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+
+  @@index([userId, status])
+}
+
+model ApiKey {
+  id         String    @id @default(cuid())
+  name       String
+  prefix     String // non-secret display/lookup prefix, e.g. tc_live_ab12
+  hash       String    @unique // sha256 hex of the full secret
+  scopes     String    @default("read,write") // comma-joined: read,write,delete,admin
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt  DateTime?
+  lastUsedAt DateTime?
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([userId])
+}
+
+model AuditEvent {
+  id        String   @id @default(cuid())
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  action    String // e.g. file.upload, file.trash, key.create, auth.login
+  target    String? // resource id
+  detail    String? // short non-sensitive context
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+}
