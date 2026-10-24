@@ -21,7 +21,7 @@
 #
 # No VPS? This same image runs FREE on Hugging Face Spaces (Docker SDK) — the
 # app then enables its embedded Local Bot API server from two secrets.
-# See README "Deploying → Option A: Hugging Face Spaces (free, no VPS)".
+# See README "Deploying → Option B: Hugging Face Spaces (free, no VPS)".
 
 services:
   bot-api:

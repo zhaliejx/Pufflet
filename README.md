@@ -62,7 +62,7 @@ Browser ──HTTPS──> Pufflet (Next.js) ──Bot API──> your private T
 
 Pufflet uses the **official Bot API** and does not try to bypass its limits:
 
-| Direction | Hosted Bot API | Local Bot API server (bundled via Docker) |
+| Direction | Hosted Bot API | Self-hosted Local Bot API server |
 |---|---|---|
 | Upload (`sendDocument`) | **50 MB** per file | **2000 MB** per file |
 | Download (`getFile`) | **20 MB** per file | **2000 MB** per file |
@@ -70,8 +70,9 @@ Pufflet uses the **official Bot API** and does not try to bypass its limits:
 Because of the hosted 20 MB `getFile` download limit, hosted deployments enforce
 `MAX_UPLOAD_MB=50` / `MAX_DOWNLOAD_MB=20`. If you need larger files, run the
 official [Local Bot API server](https://github.com/tdlib/telegram-bot-api) —
-Pufflet ships it ready-to-use in `docker-compose.yml` (see *Deploying →
-Docker with the bundled Local Bot API*), point `TELEGRAM_API_BASE` at it, and
+bundled in `docker-compose.yml`, embedded in the all-in-one Docker image, **or
+as a standalone server on any always-on host** (Render, Fly.io, a VPS — see
+*Deploying → Option A*); point `TELEGRAM_API_BASE` at it, and
 raise both limits. Pufflet never uses undocumented
 behavior; `file_unique_id` is treated as an index key, never a download handle or
 content checksum (integrity uses SHA-256 computed while streaming).
@@ -139,17 +140,54 @@ Telegram credentials out of automated tests.
 
 ## Deploying
 
-**No VPS required.** Option A (Vercel) and Option B (Hugging Face Spaces) are both
-free and need nothing but a browser and your Telegram credentials.
+**No VPS required.** Option A (Vercel + a self-hosted Bot API server) and
+Option B (Hugging Face Spaces) are both free-tier friendly and need nothing
+but a browser and your Telegram credentials.
 
-### Option A — Vercel (serverless, ~10 minutes, free)
+### Option A — Vercel + your own Bot API server (~15 minutes, free tiers)
 
-Works today with honest limits: serverless functions cap the request body at
-**~4.5 MB**, so uploads are limited to ≈4 MB per file (`MAX_UPLOAD_MB=4`), and
-downloads follow the hosted Bot API's 20 MB `getFile` cap. The self-hosted
-Local Bot API server **cannot** run on Vercel — serverless has no long-running
-processes or persistent disk — so the 2000 MB mode is a platform
-impossibility there, not a Pufflet limitation. Need bigger files? Use Option B.
+The strongest free combo: **Pufflet runs on Vercel** (serverless, zero
+maintenance) while the **official Local Bot API server runs on any host that
+keeps a process alive** — Render's free tier works great. Pufflet needs one
+environment variable (`TELEGRAM_API_BASE`) pointing at that server, and the
+Bot API's 2000 MB limits apply.
+
+Honest limits of this split:
+
+- **Downloads: up to 2000 MB per file.** They stream through Vercel functions,
+  which may run up to 300 s on the Hobby plan (Fluid compute, on by default for
+  new projects). A 2 GB file needs a sustained ~7 MB/s to fit that window —
+  treat "a few hundred MB" as the comfortable zone on slower links.
+- **Uploads: ≈4 MB per file.** Vercel caps a function's *request body* at
+  4.5 MB — a platform limit no backend configuration can lift — so keep
+  `MAX_UPLOAD_MB=4`. Need 2000 MB uploads too? Option B runs the same app with
+  the bot API embedded, fully free, in both directions.
+- Bandwidth budgets: Vercel Hobby includes 100 GB fast data transfer + 10 GB
+  fast origin transfer per month; Render free includes 100 GB egress per month.
+  Plenty for personal use — a cloud of downloaded movies will hit them.
+
+**Step 1 — the Bot API server (skip if you already have one).** On Render:
+*New + → Web Service → Existing image* → `aiogram/telegram-bot-api:latest` →
+under *Advanced* set the **Docker Command** (substitute your own values from
+[my.telegram.org](https://my.telegram.org) → *API development tools*):
+
+```
+--api-id=1234567 --api-hash=0123456789abcdef0123456789abcdef --local --http-port=8081
+```
+
+Render detects the listening port and routes
+`https://<your-service>.onrender.com` to it. ⚠️ **`--local` is mandatory** —
+it is what lifts the limits and what makes `getFile` return a servable file
+path. Any Docker host works the same way (same image + command, or the
+`bot-api` service in `docker-compose.yml`).
+
+**Step 2 — one-time `logOut` migration.** If your bot has ever talked to the
+hosted API (any `api.telegram.org` call), Telegram refuses Local Bot API
+connections until it logs out. From your machine with `TELEGRAM_BOT_TOKEN` in
+`.env`: `npm run tg:logout` — once, irreversible; hosted-issued `file_id`s stop
+working (re-upload anything uploaded before the switch).
+
+**Step 3 — the Vercel app.**
 
 1. **Database** — create a free Postgres at [neon.tech](https://neon.tech)
    (or Vercel Postgres) and copy the connection string.
@@ -168,19 +206,37 @@ impossibility there, not a Pufflet limitation. Need bigger files? Use Option B.
    | `DATABASE_URL` | your Postgres connection string (`?sslmode=require`) |
    | `TELEGRAM_BOT_TOKEN` | your bot token |
    | `TELEGRAM_CHAT_ID` | your storage channel id |
-   | `MAX_UPLOAD_MB` | `4` (Vercel body cap) |
-   | `MAX_DOWNLOAD_MB` | `20` (hosted `getFile` cap) |
+   | `TELEGRAM_API_BASE` | `https://<your-bot-api>.onrender.com` (no trailing slash) |
+   | `MAX_UPLOAD_MB` | `4` (Vercel request-body cap) |
+   | `MAX_DOWNLOAD_MB` | `2000` (Local Bot API limit) |
    | `STATE_BACKUP` | `false` (Postgres already persists; snapshots add nothing here) |
    | `SEED_DEFAULT_USER` | `true` (default) — seeds `pufflet@pufflet.com` / `pufflet` |
 
 5. **Deploy** → open the URL → sign in with the seeded account
    (`pufflet@pufflet.com` / `pufflet`) → **change the password immediately** in
    Settings → Account (the login screen shows the hint until you do).
+6. **Check** — Settings → *Telegram storage* should show *Connected* with
+   storage mode **local (2000 MB)**.
 
-### Option B — Hugging Face Spaces (FREE, no VPS, 2000 MB)
+Notes:
+
+- **Keep the Render server awake.** Free services spin down after 15 idle
+  minutes and then need ~1 minute to wake (Pufflet's 120 s request timeout
+  absorbs that, but it feels slow). Point a free pinger such as cron-job.org
+  or UptimeRobot at `https://<your-bot-api>.onrender.com/` every 5–10 minutes;
+  Render's 750 free instance-hours cover one always-on service.
+- **Security.** The Bot API server is a public endpoint that only answers
+  requests carrying your bot token — keep the URL low-key and the token in
+  Vercel's environment, never in the browser.
+- The server's disk is ephemeral and that is fine: `getFile` re-fetches file
+  content from Telegram on demand, so no persistent volume is needed.
+
+### Option B — Hugging Face Spaces (FREE, no VPS, 2000 MB both ways)
 
 One free Space (2 vCPU / 16 GB RAM, Docker SDK) runs the **all-in-one image**:
 the Next.js app *plus* the official Local Bot API server in the same container.
+This is also the free way to get **2000 MB uploads** — the Vercel path above
+caps uploads at ≈4 MB.
 Free Spaces sleep after ~48 h of inactivity and wipe their disk on every
 restart — Pufflet's **state backup** (below) restores everything automatically
 within seconds of waking up.
@@ -325,8 +381,9 @@ vercel.json                 Vercel build command (postgres prisma client)
 - Single-node in-memory rate limiter (fine for personal use; swap for Redis when clustering)
 - Full-text *content* search is out of scope (filename + metadata search only)
 - The hosted Bot API's 20 MB download cap applies unless you self-host the Local
-  Bot API server; on Vercel uploads are additionally capped at ≈4 MB by the
-  serverless request body limit
+  Bot API server (bundled, or remote via `TELEGRAM_API_BASE`); on Vercel uploads
+  are additionally capped at ≈4 MB by the platform's 4.5 MB request-body limit,
+  regardless of which Bot API is used
 - Folder trash/restore uses shared timestamps: items trashed individually keep
   their own trash time and are not silently restored with the folder
 - The state snapshot assumes the bot has the *pin messages* admin right in the
