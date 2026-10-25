@@ -36,6 +36,9 @@ Authorization: Bearer tc_live_xxxxxxxxxxxxxxxx
 | DELETE | `/api/v1/files/{id}?permanent=1` | delete | **Irreversibly** delete (Telegram message too) |
 | POST | `/api/v1/files/{id}?action=restore` | write | Restore from trash |
 | GET | `/api/v1/files/{id}/download` | read | Stream the file (vault containers are decrypted transparently) |
+| POST | `/api/v1/files/{id}/share` | write | Create a public share link (`{expiresInDays?}`) |
+| GET | `/api/v1/files/{id}/share` | read | List the file's share links |
+| DELETE | `/api/v1/files/{id}/share?linkId={id}` | write | Revoke a share link |
 | GET | `/api/v1/folders` | read | List folders (`all=1` includes trashed) |
 | POST | `/api/v1/folders` | write | Create folder |
 | PATCH | `/api/v1/folders/{id}` | write | Rename (`{name}`) or move (`{parentId}`) |
@@ -89,6 +92,35 @@ was stored by the vault (all uploads are, by default), the AES-256-GCM container
 is decrypted and de-padded transparently — you always receive the original bytes.
 Files uploaded before the vault existed are served verbatim. Add `?inline=1` to
 serve inline (browser preview) instead of a forced download.
+
+## Public share links (no login)
+
+Share links are unguessable capability URLs — the token in the path is the
+authorization. They can be created/managed by the owner (session API or the
+`/api/v1/files/{id}/share` endpoints above) and consumed by anyone:
+
+| Method | Path | Auth | Description |
+|---|---|---|---|
+| GET | `/s/{token}` | none | Branded download page (HTML) |
+| GET | `/api/share/{token}` | none | Metadata: `{name, size, mimeType, createdAt, downloadPath}` — never owner data |
+| GET | `/api/share/{token}/download` | none | The original bytes (vault-decoded); `?inline=1` for browser-safe types |
+
+```bash
+# create a link that expires in 7 days
+LINK=$(curl -s -X POST https://your-pufflet/api/v1/files/$FILE_ID/share \
+  -H "Authorization: Bearer $TOK" -H "Content-Type: application/json" \
+  -d '{"expiresInDays":7}' | sed 's/.*"urlPath":"\([^"]*\)".*/\1/')
+# → "/s/AbCdE…43-chars" — hand out https://your-pufflet$LINK
+
+# anyone can download without an account
+curl -sL "https://your-pufflet/api/share/$TOKEN/download" -o file.bin
+```
+
+- Revoke with `DELETE /api/v1/files/{id}/share?linkId=…`; revoked/expired links
+  answer `404` exactly like unknown tokens (no enumeration oracle).
+- Public downloads are rate-limited per IP (30/min) and counted on the link
+  (`downloads` / `lastDownloadAt` in the list response).
+- Deleting a file cascades: all of its share links die with it.
 
 ## Folder tree rules
 

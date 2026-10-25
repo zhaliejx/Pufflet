@@ -35,6 +35,7 @@ import {
   MoveDialog,
   NewFolderDialog,
   RenameDialog,
+  ShareDialog,
   MoveTarget,
 } from "./dialogs";
 import { PuffletIcon, PuffletWordmark } from "./logo";
@@ -72,6 +73,7 @@ export function DriveApp({ user, onSignOut }: Props) {
   const [newFolderOpen, setNewFolderOpen] = useState(false);
   const [renameTarget, setRenameTarget] = useState<MoveTarget | null>(null);
   const [moveTarget, setMoveTarget] = useState<MoveTarget | null>(null);
+  const [shareTarget, setShareTarget] = useState<MoveTarget | null>(null);
   const [confirm, setConfirm] = useState<{
     title: string;
     description: string;
@@ -138,6 +140,7 @@ export function DriveApp({ user, onSignOut }: Props) {
   const actions = {
     onOpenFolder: (id: string) => drive.openFolder(id),
     onDownload: (row: FileRow) => downloadFile(row.id),
+    onShare: (t: RowTarget) => setShareTarget(t),
     onRename: (t: RowTarget) => setRenameTarget(t),
     onMove: (t: RowTarget) => setMoveTarget(t),
     onStar: async (row: FileRow) => {
@@ -545,6 +548,7 @@ export function DriveApp({ user, onSignOut }: Props) {
       />
       <RenameDialog target={renameTarget} onClose={() => setRenameTarget(null)} onRenamed={refresh} />
       <MoveDialog target={moveTarget} folders={drive.allFolders} onClose={() => setMoveTarget(null)} onMoved={refresh} />
+      <ShareDialog target={shareTarget} onClose={() => setShareTarget(null)} />
       {confirm && (
         <ConfirmDialog
           open

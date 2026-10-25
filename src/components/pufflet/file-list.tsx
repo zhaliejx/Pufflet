@@ -24,6 +24,7 @@ import {
   Star,
   MoreVertical,
   Download,
+  Link2,
   Pencil,
   FolderInput,
   Trash2,
@@ -67,6 +68,7 @@ function kindIcon(name: string, mime: string) {
 interface Actions {
   onOpenFolder: (id: string) => void;
   onDownload: (row: FileRow) => void;
+  onShare: (t: RowTarget) => void;
   onRename: (t: RowTarget) => void;
   onMove: (t: RowTarget) => void;
   onStar: (row: FileRow) => void;
@@ -115,6 +117,11 @@ function ActionMenu({
             {target.type === "folder" && (
               <DropdownMenuItem onClick={() => actions.onOpenFolder(target.id)}>
                 <FolderIcon className="h-4 w-4" /> Open
+              </DropdownMenuItem>
+            )}
+            {target.type === "file" && (
+              <DropdownMenuItem onClick={() => actions.onShare(target)}>
+                <Link2 className="h-4 w-4" /> Share
               </DropdownMenuItem>
             )}
             <DropdownMenuItem onClick={() => actions.onRename(target)}>
@@ -176,6 +183,11 @@ function ContextShell({
             {target.type === "folder" && (
               <ContextMenuItem onClick={() => actions.onOpenFolder(target.id)}>
                 <FolderIcon className="h-4 w-4" /> Open
+              </ContextMenuItem>
+            )}
+            {target.type === "file" && (
+              <ContextMenuItem onClick={() => actions.onShare(target)}>
+                <Link2 className="h-4 w-4" /> Share
               </ContextMenuItem>
             )}
             <ContextMenuItem onClick={() => actions.onRename(target)}>

@@ -1,8 +1,15 @@
 // Mini service: mock Telegram Bot API for local end-to-end testing.
-// Implements the subset Pufflet uses: getMe, sendDocument, getFile,
-// /file/bot<token>/<path>, deleteMessage. In-memory only.
+// Implements the subset Pufflet uses: getMe, sendDocument (bytes OR by
+// file_id), getFile, /file/bot<token>/<path>, deleteMessage — plus the
+// state-backup extras (getChat/pin/editMessageMedia). In-memory index with
+// DISK-BACKED file bodies: getFile returns an ABSOLUTE path like the real
+// --local Bot API server (which serves no /file/ HTTP route at all).
 // NOT for production use — it exists so automated tests and local demos can
 // run without real Telegram credentials.
+
+import { mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import path from "node:path";
 
 const PORT = 3031;
 const TOKEN = "123456:ABC-mock-local";
@@ -15,12 +22,27 @@ interface StoredDoc {
   filename: string;
   mime: string;
   message_id: number;
+  diskPath?: string;
 }
 
 const docs = new Map<string, StoredDoc>();
 let nextId = 100;
 let nextMsgId = 1000;
 let pinnedMessageId = 0;
+
+// Where the mock "Bot API server" places files, mirroring --dir of the real
+// local server. getFile returns this absolute path; the app reads from disk.
+const FILE_DIR = path.join(tmpdir(), "pufflet-telegram-mock-files");
+mkdirSync(FILE_DIR, { recursive: true });
+
+function persistToDisk(doc: StoredDoc): void {
+  const dir = path.join(FILE_DIR, doc.file_id);
+  mkdirSync(dir, { recursive: true });
+  const safe = doc.filename.replace(/[^\w.-]/g, "_") || "file.bin";
+  const p = path.join(dir, safe);
+  writeFileSync(p, doc.bytes);
+  doc.diskPath = p;
+}
 
 const json = (data: unknown, status = 200) =>
   new Response(JSON.stringify(data), { status, headers: { "content-type": "application/json" } });
@@ -106,11 +128,44 @@ Bun.serve({
       const m = /boundary=(.+)$/.exec(ct);
       if (!m) return err(400, "no boundary");
       const body = await readAll(req.body as ReadableStream<Uint8Array>);
+      const text = Buffer.from(body).toString("latin1");
       const parsed = parseMultipart(body, m[1], "document");
-      if (!parsed) return err(400, "no document part");
+
+      // document=<file_id> (no file part) -> re-send by file_id: the Bot API
+      // resolves the id server-side and posts a fresh message + file_id.
+      if (!parsed) {
+        const fid = /name="document"\r\n\r\n([^\r\n]+)\r\n/.exec(text)?.[1]?.trim();
+        const src = fid ? docs.get(fid) : undefined;
+        if (!src) return err(400, `file_id not found (mock): ${fid ?? "?"}`);
+        const new_id = `MOCKFILE_${nextId++}`;
+        const message_id = nextMsgId++;
+        const doc: StoredDoc = {
+          file_id: new_id,
+          file_unique_id: `uniq_${new_id}`,
+          bytes: src.bytes,
+          size: src.size,
+          filename: src.filename,
+          mime: src.mime,
+          message_id,
+        };
+        persistToDisk(doc);
+        docs.set(new_id, doc);
+        return ok({
+          message_id,
+          chat: { id: -1001234567890 },
+          document: {
+            file_id: new_id,
+            file_unique_id: doc.file_unique_id,
+            file_name: doc.filename,
+            mime_type: doc.mime,
+            file_size: doc.size,
+          },
+        });
+      }
+
       const file_id = `MOCKFILE_${nextId++}`;
       const message_id = nextMsgId++;
-      docs.set(file_id, {
+      const doc: StoredDoc = {
         file_id,
         file_unique_id: `uniq_${file_id}`,
         bytes: parsed.bytes,
@@ -118,13 +173,15 @@ Bun.serve({
         filename: parsed.filename,
         mime: parsed.mime,
         message_id,
-      });
+      };
+      persistToDisk(doc);
+      docs.set(file_id, doc);
       return ok({
         message_id,
         chat: { id: -1001234567890 },
         document: {
           file_id,
-          file_unique_id: `uniq_${file_id}`,
+          file_unique_id: doc.file_unique_id,
           file_name: parsed.filename,
           mime_type: parsed.mime,
           file_size: parsed.bytes.byteLength,
@@ -136,7 +193,10 @@ Bun.serve({
       const file_id = url.searchParams.get("file_id") ?? "";
       const doc = docs.get(file_id);
       if (!doc) return err(400, "file not found (mock)");
-      return ok({ file_id, file_unique_id: doc.file_unique_id, file_size: doc.size, file_path: `documents/${file_id}/${doc.filename}` });
+      if (!doc.diskPath) persistToDisk(doc);
+      // The real --local server returns an ABSOLUTE path (and re-downloads
+      // missing files from the cloud before answering).
+      return ok({ file_id, file_unique_id: doc.file_unique_id, file_size: doc.size, file_path: doc.diskPath });
     }
 
     if (req.method === "GET" && method.startsWith("file/")) {
@@ -207,7 +267,7 @@ Bun.serve({
         if (doc.message_id === targetId) docs.delete(fid);
       }
       const file_id = `MOCKFILE_${nextId++}`;
-      docs.set(file_id, {
+      const doc: StoredDoc = {
         file_id,
         file_unique_id: `uniq_${file_id}`,
         bytes: parsed.bytes,
@@ -215,13 +275,15 @@ Bun.serve({
         filename: parsed.filename,
         mime: parsed.mime,
         message_id: targetId,
-      });
+      };
+      persistToDisk(doc);
+      docs.set(file_id, doc);
       return ok({
         message_id: targetId,
         chat: { id: -1001234567890 },
         document: {
           file_id,
-          file_unique_id: `uniq_${file_id}`,
+          file_unique_id: doc.file_unique_id,
           file_name: parsed.filename,
           mime_type: parsed.mime,
           file_size: parsed.bytes.byteLength,

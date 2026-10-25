@@ -25,8 +25,8 @@ import { config, isTelegramConfigured } from "@/lib/config";
 import { telegram } from "@/lib/telegram";
 import type { Prisma } from "@prisma/client";
 
-export const SNAPSHOT_VERSION = 2;
-export const LEGACY_SNAPSHOT_VERSIONS = [1] as const; // still restorable (pre-vault snapshots)
+export const SNAPSHOT_VERSION = 3;
+export const LEGACY_SNAPSHOT_VERSIONS = [1, 2] as const; // still restorable (pre-vault / pre-share snapshots)
 export const STATE_BACKUP_MARKER = "pufflet-state-backup.json";
 const MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024; // safety cap while restoring
 
@@ -96,16 +96,32 @@ export interface SnapshotSetting {
   value: string;
 }
 
+/** Public share links (v3+). Tokens ride in the snapshot so links keep
+ *  working after a self-heal on an ephemeral host. */
+export interface SnapshotShareLink {
+  id: string;
+  token: string;
+  fileId: string;
+  createdBy: string;
+  createdAt: string;
+  revokedAt: string | null;
+  expiresAt: string | null;
+  downloads: number;
+  lastDownloadAt: string | null;
+}
+
 export interface SnapshotData {
   version: number;
   exportedAt: string;
-  counts: { users: number; folders: number; files: number; apiKeys: number };
+  counts: { users: number; folders: number; files: number; apiKeys: number; shareLinks?: number };
   users: SnapshotUser[];
   folders: SnapshotFolder[];
   files: SnapshotFile[];
   apiKeys: SnapshotApiKey[];
   /** v2+. v1 snapshots have no settings (empty array after parse). */
   settings: SnapshotSetting[];
+  /** v3+. v1/v2 snapshots have no share links (empty array after parse). */
+  shareLinks: SnapshotShareLink[];
 }
 
 // --------------------------------------------------------------------------
@@ -139,6 +155,7 @@ export function parseSnapshot(text: string): SnapshotData {
       folders: raw.folders!.length,
       files: raw.files!.length,
       apiKeys: raw.apiKeys!.length,
+      shareLinks: raw.shareLinks?.length ?? 0,
     },
     users: raw.users as SnapshotUser[],
     folders: raw.folders as SnapshotFolder[],
@@ -146,8 +163,11 @@ export function parseSnapshot(text: string): SnapshotData {
     apiKeys: raw.apiKeys as SnapshotApiKey[],
     // v1 snapshots predate the vault / Setting table: no key material in them.
     // A fresh key is generated on the first post-restore upload, and the next
-    // flush persists it as v2.
-    settings: isCurrent && Array.isArray(raw.settings) ? (raw.settings as SnapshotSetting[]) : [],
+    // flush persists it as v2+.
+    settings: version >= 2 && Array.isArray(raw.settings) ? (raw.settings as SnapshotSetting[]) : [],
+    // v3+: public share links. Older snapshots restore with none; owners can
+    // recreate links (or accept that pre-v3 shares died with the old DB).
+    shareLinks: Array.isArray(raw.shareLinks) ? (raw.shareLinks as SnapshotShareLink[]) : [],
   };
 }
 
@@ -161,6 +181,7 @@ export async function applySnapshotData(tx: Prisma.TransactionClient, data: Snap
   await tx.auditEvent.deleteMany({});
   await tx.uploadJob.deleteMany({});
   await tx.session.deleteMany({});
+  await tx.shareLink.deleteMany({});
   await tx.apiKey.deleteMany({});
   await tx.file.deleteMany({});
   await tx.folder.updateMany({ data: { parentId: null } });
@@ -248,6 +269,24 @@ export async function applySnapshotData(tx: Prisma.TransactionClient, data: Snap
   for (const s of data.settings ?? []) {
     await tx.setting.create({ data: { key: s.key, value: s.value } });
   }
+
+  // Public share links (v3+): tokens are restored verbatim so previously
+  // handed-out /s/<token> URLs keep working after a self-heal.
+  for (const l of data.shareLinks ?? []) {
+    await tx.shareLink.create({
+      data: {
+        id: l.id,
+        token: l.token,
+        fileId: l.fileId,
+        createdBy: l.createdBy,
+        createdAt: new Date(l.createdAt),
+        revokedAt: l.revokedAt ? new Date(l.revokedAt) : null,
+        expiresAt: l.expiresAt ? new Date(l.expiresAt) : null,
+        downloads: l.downloads ?? 0,
+        lastDownloadAt: l.lastDownloadAt ? new Date(l.lastDownloadAt) : null,
+      },
+    });
+  }
 }
 
 // --------------------------------------------------------------------------
@@ -317,17 +356,24 @@ async function readStreamCapped(stream: ReadableStream<Uint8Array>, cap: number)
 }
 
 async function buildSnapshotData(): Promise<SnapshotData> {
-  const [users, folders, files, apiKeys, settings] = await Promise.all([
+  const [users, folders, files, apiKeys, settings, shareLinks] = await Promise.all([
     db.user.findMany({ orderBy: { createdAt: "asc" } }),
     db.folder.findMany({ orderBy: { createdAt: "asc" } }),
     db.file.findMany({ orderBy: { createdAt: "asc" } }),
     db.apiKey.findMany({ orderBy: { createdAt: "asc" } }),
     db.setting.findMany({ orderBy: { key: "asc" } }),
+    db.shareLink.findMany({ orderBy: { createdAt: "asc" } }),
   ]);
   const data: SnapshotData = {
     version: SNAPSHOT_VERSION,
     exportedAt: new Date().toISOString(),
-    counts: { users: users.length, folders: folders.length, files: files.length, apiKeys: apiKeys.length },
+    counts: {
+      users: users.length,
+      folders: folders.length,
+      files: files.length,
+      apiKeys: apiKeys.length,
+      shareLinks: shareLinks.length,
+    },
     users: users.map((u) => ({
       id: u.id,
       email: u.email,
@@ -380,6 +426,17 @@ async function buildSnapshotData(): Promise<SnapshotData> {
       createdAt: iso(k.createdAt)!,
     })),
     settings: settings.map((s) => ({ key: s.key, value: s.value })),
+    shareLinks: shareLinks.map((l) => ({
+      id: l.id,
+      token: l.token,
+      fileId: l.fileId,
+      createdBy: l.createdBy,
+      createdAt: iso(l.createdAt)!,
+      revokedAt: iso(l.revokedAt),
+      expiresAt: iso(l.expiresAt),
+      downloads: l.downloads,
+      lastDownloadAt: iso(l.lastDownloadAt),
+    })),
   };
   return data;
 }
@@ -488,7 +545,8 @@ export async function restoreIfEmpty(): Promise<{ restored: boolean; reason?: st
   console.log(
     `[state-backup] restored snapshot (exported ${data.exportedAt}): ` +
       `${data.counts.users} user(s), ${data.counts.folders} folder(s), ${data.counts.files} file(s), ${data.counts.apiKeys} API key(s)` +
-      (data.settings.length ? `, ${data.settings.length} setting(s) incl. vault key` : ""),
+      (data.settings.length ? `, ${data.settings.length} setting(s) incl. vault key` : "") +
+      (data.shareLinks.length ? `, ${data.shareLinks.length} share link(s)` : ""),
   );
   return { restored: true };
 }

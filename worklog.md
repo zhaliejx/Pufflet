@@ -206,3 +206,28 @@ Work Log:
 Stage Summary:
 - Everything in the storage chat is now ciphertext under opaque names: AES-256-GCM (AAD-protected header, random 0-64KiB padding), original name/mime/size only in the DB; downloads decrypt transparently; pre-vault files keep working untouched
 - User actions: Render auto-deploys 633b9db (db push adds Setting table; next snapshot flush becomes v2 with the vault key). Optional hardening: add PUFFLET_ENCRYPTION_KEY=<long random passphrase> in Render env — key then lives ONLY in env (never in DB/snapshot); losing it loses vault files, so store it safely. Legacy files (uploaded before) download fine as-is; new uploads encrypted from the first one
+
+---
+Task ID: 20
+Agent: main (Z.ai)
+Task: Fix "Telegram file download failed (404)" (TG_DOWNLOAD) on the embedded Local Bot API server + add a no-login Share feature
+
+Work Log:
+- Root-caused the 404 by cloning tdlib/telegram-bot-api source AND running the real pinned 10.3 binary (registry-layer extraction): the Local Bot API server has NO /file/bot<token>/<path> HTTP route at all — HttpConnection only routes /bot<token>/<method> and answers 404 "Not Found" for /file/...; verified empirically (real binary: /file/bot → {"error_code":404,"description":"Not Found"}, /bot/getMe → 401 control). Hosted api.telegram.org DOES serve /file/ — which is why downloads broke the moment the embedded server came alive (Task 18), and why the pinned-snapshot restore (same code path) silently failed on reboot
+- Local-mode download model implemented in telegram.ts: --local getFile returns the file's ABSOLUTE disk path and the server re-downloads from the Telegram cloud before answering (do_get_file always calls downloadFile) → openDownloadStream now reads bytes via fs.createReadStream from that path; HTTP /file/ kept only for hosted mode (per-segment URL encoding added); localMode derived from resolved base, not the global flag (test-friendly)
+- Stale-reference self-heal: when getFile/fetch fail (old file after server restart, GC race), ONE recovery attempt re-sends the document BY file_id (fields-only multipart, buildMultipartStream file part now optional) — re-registers the file with the running server, returns a fresh file_id — then the download is retried and {repaired} is returned; failed recoveries delete the duplicate message (no channel orphans); routes persist repaired ids via files.repairFileReferences (row update + best-effort delete of the replaced message + markStateDirty + audit file.repair); TG_TOO_LARGE/TG_NO_FILE_PATH are fatal (never repaired); state-backup restore passes allowRepair:false
+- Share feature: ShareLink model (sqlite+postgres twins; token = 32 random bytes base64url, unique; cascade on file delete) + src/lib/share.ts (create/list/revoke/resolve with uniform 404s — no enumeration oracle, isPublicInlineSafe, ≤20 active links/file, optional expiresInDays ≤10y)
+- Routes: session POST/GET/DELETE /api/files/[id]/share; v1 mirrors with scopes (write/read/write); public GET /api/share/[token] (metadata, owner fields never exposed) + GET /api/share/[token]/download (vault-decoded stream, per-IP 30/min rate limit, download counter, audit share.download, inline only for image/video/audio/pdf/text-plain, nosniff); public page /s/[token] (server component, force-dynamic, branded card, image/video/pdf preview, robots noindex)
+- UI: ShareDialog in dialogs.tsx (list active links, create → auto-copy URL, per-link downloads count, revoke) wired into file-list Actions (dropdown + context menu, files only) and drive-app
+- state-backup: SNAPSHOT_VERSION=3 (+shareLinks; v1/v2 legacy-parse, settings only for ≥2), wipe+restore shareLink rows, counts.shareLinks, restore log line
+- telegram-mock: docs now DISK-BACKED — getFile returns absolute tmpdir paths (mirrors real --local), sendDocument supports document=<file_id> re-send (copy semantics), /file/ route kept for legacy; docker-compose: bot-api-data volume now ALSO mounted into the app at /var/lib/telegram-bot-api (absolute paths must resolve in both containers)
+- Tests: unit 61/61 (new: local-mode disk read with /file/-never-called assertion, stale-ref repair happy path, failed-repair cleanup, TG_TOO_LARGE no-repair, backup v3/v2/v1 matrix); tsc: telegram.ts narrowing cleanups brought errors 24→20 (rest pre-existing: bun:test imports, mock Bun types, auth users alias, skills/); lint clean
+- e2e 49/49 incl. new section 11: share create → public page 200 → meta (owner-data leak grep) → no-login download byte-identical → counter=1 → 401 guards → revoke → 404 → bogus token 404 → v1 create/revoke + revoked-key-401
+- Docs: README (feature bullet, "How downloads actually work" verified-model section, Share links section), docs/API.md (share endpoint map + public-links section), docker-compose comment
+- Hygiene: .botapi-sim/ (extracted binary) untracked from git + .gitignore'd
+- Validation runs: mock+dev server up, e2e full pass after provisioning TELEGRAM_API_BASE/BOT_TOKEN/CHAT_ID for the mock
+
+Stage Summary:
+- Downloads now work in EVERY embedded/local-server deployment: local mode reads getFile's absolute disk path (server cloud-re-downloads missing files), hosted keeps the HTTP route, and stale references self-heal via re-send-by-file_id with id persistence + channel cleanup — this also un-breaks the pinned-snapshot restore, so ephemeral-host self-healing works again
+- Share links ship end-to-end: UI dialog, session+v1 management APIs, public page/meta/download with rate limiting and revocation, snapshot persistence (v3)
+- User action: redeploy; existing /s links survive self-heal; note docker-compose users get the shared volume automatically, external-bot-api hosts must mount the bot-api work dir at the same path for >20MB downloads

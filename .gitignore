@@ -63,3 +63,4 @@ server.log
 /upload/
 /examples/
 *.tsbuildinfo
+.botapi-sim/

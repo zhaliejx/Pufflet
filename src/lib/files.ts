@@ -9,6 +9,7 @@ import { sanitizeName } from "@/lib/folder-utils";
 import { telegram } from "@/lib/telegram";
 import { audit } from "@/lib/audit";
 import { encodeUploadStream, obfuscatedStorageName } from "@/lib/vault";
+import { markStateDirty } from "@/lib/state-backup";
 import { Folder, File } from "@prisma/client";
 
 export class ServiceError extends Error {
@@ -560,6 +561,37 @@ export async function getFileForDownload(ownerId: string, fileId: string): Promi
   if (!file.tgFileId) throw new ServiceError("Stored file reference missing", 500);
   audit("file.download", ownerId, file.id, file.name);
   return file;
+}
+
+/**
+ * Persist healed Telegram references after a download recovered via
+ * re-send-by-file_id (stale file reference, e.g. after a Local Bot API server
+ * restart). Swaps the DB row to the fresh message and deletes the replaced
+ * one so the storage chat never accumulates duplicate copies.
+ */
+export async function repairFileReferences(
+  fileId: string,
+  repaired: { chatId: string; messageId: string; fileId: string; fileUniqueId: string },
+): Promise<void> {
+  const file = await db.file.findUnique({ where: { id: fileId } });
+  if (!file) return;
+  const oldChatId = file.tgChatId;
+  const oldMessageId = file.tgMessageId;
+  await db.file.update({
+    where: { id: file.id },
+    data: {
+      tgChatId: repaired.chatId,
+      tgMessageId: repaired.messageId,
+      tgFileId: repaired.fileId,
+      tgFileUniqueId: repaired.fileUniqueId,
+    },
+  });
+  const sameMessage = oldChatId === repaired.chatId && oldMessageId === repaired.messageId;
+  if (oldChatId && oldMessageId && !sameMessage) {
+    await telegram().deleteMessage(oldChatId, oldMessageId).catch(() => {});
+  }
+  audit("file.repair", file.ownerId, file.id, file.name);
+  markStateDirty();
 }
 
 export async function stats(ownerId: string) {

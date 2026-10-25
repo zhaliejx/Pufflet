@@ -179,6 +179,40 @@ contains "second flush edits in place" "$FLUSH2" '"ok":true'
 PIN=$(curl -s "http://localhost:3031/bot123456:ABC-mock-local/getChat")
 contains "mock chat has pinned snapshot" "$PIN" 'pufflet-state-backup.json'
 
+say "== 11. public share links (no login) =="
+SH=$(curl -s -X POST "$BASE/api/files/$ID2/share" -b "$COOKIE" -H 'content-type: application/json' -d '{}')
+contains "share link created" "$SH" '"urlPath":"/s/'
+TOKS=$(echo "$SH" | sed 's/.*"urlPath":"\/s\/\([^"]*\)".*/\1/')
+SLID=$(echo "$SH" | sed 's/.*"link":{"id":"\([^"]*\)".*/\1/')
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/s/$TOKS")
+check "public share page renders without login (200)" "$code" "200"
+META=$(curl -s "$BASE/api/share/$TOKS")
+contains "public meta exposes file name" "$META" '"name"'
+if echo "$META" | grep -q 'ownerId\|"email"\|passwordHash'; then
+  FAIL_COUNT=$((FAIL_COUNT+1)); say "  FAIL: public meta leaks owner data"
+else
+  PASS_COUNT=$((PASS_COUNT+1)); say "  ok: public meta hides owner data"
+fi
+curl -s -o "$T/sdl.txt" "$BASE/api/share/$TOKS/download"
+if diff -q "$T/b.txt" "$T/sdl.txt" >/dev/null; then PASS_COUNT=$((PASS_COUNT+1)); say "  ok: share download bytes identical (no login)"; else FAIL_COUNT=$((FAIL_COUNT+1)); say "  FAIL: share download differs"; fi
+SHLIST=$(curl -s "$BASE/api/files/$ID2/share" -b "$COOKIE")
+contains "download counter incremented" "$SHLIST" '"downloads":1'
+SH404=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/files/$ID2/share")
+check "share management requires session (401)" "$SH404" "401"
+REV=$(curl -s -X DELETE "$BASE/api/files/$ID2/share?linkId=$SLID" -b "$COOKIE")
+contains "revoke works" "$REV" '"ok":true'
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/share/$TOKS/download")
+check "revoked link rejected (404)" "$code" "404"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/share/bogus-token-xyz")
+check "bogus token rejected (404)" "$code" "404"
+# v1 mirror: create + list with the API token from section 7
+V1SH=$(curl -s -X POST "$BASE/api/v1/files/$ID2/share" -H "Authorization: Bearer $TOK" -H 'content-type: application/json' -d '{}')
+contains "v1 share create works" "$V1SH" '"urlPath":"/s/'
+V1SLID=$(echo "$V1SH" | sed 's/.*"link":{"id":"\([^"]*\)".*/\1/')
+curl -s -X DELETE "$BASE/api/v1/files/$ID2/share?linkId=$V1SLID" -H "Authorization: Bearer $TOK" >/dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/v1/files/$ID2/share" -H "Authorization: Bearer $TOKR" -H 'content-type: application/json' -d '{}')
+check "revoked read-only key cannot share (401)" "$code" "401"
+
 say ""
 say "==================================="
 say "PASS: $PASS_COUNT   FAIL: $FAIL_COUNT"

@@ -85,11 +85,30 @@ model File {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  shareLinks ShareLink[]
+
   @@index([ownerId, folderId, trashedAt])
   @@index([ownerId, status])
   @@index([ownerId, trashedAt, updatedAt])
   @@index([normalizedName])
   @@index([tgFileUniqueId])
+}
+
+// Public share links: unguessable capability tokens in the URL. Anyone with
+// the link can download the file WITHOUT logging in; the owner can revoke.
+model ShareLink {
+  id             String    @id @default(cuid())
+  token          String    @unique // 43-char base64url of 32 random bytes — the URL secret
+  fileId         String
+  file           File      @relation(fields: [fileId], references: [id], onDelete: Cascade)
+  createdBy      String // owner user id at creation time
+  createdAt      DateTime  @default(now())
+  revokedAt      DateTime?
+  expiresAt      DateTime?
+  downloads      Int       @default(0)
+  lastDownloadAt DateTime?
+
+  @@index([fileId])
 }
 
 model UploadJob {

@@ -1,5 +1,5 @@
 import { getSessionUser } from "@/lib/auth";
-import { getFileForDownload, ServiceError } from "@/lib/files";
+import { getFileForDownload, repairFileReferences, ServiceError } from "@/lib/files";
 import { telegram } from "@/lib/telegram";
 import { decodeDownloadStream } from "@/lib/vault";
 import { contentDisposition, errorResponse, jsonError } from "@/lib/api-utils";
@@ -20,7 +20,11 @@ export async function GET(req: Request, ctx: Ctx) {
   const { id } = await ctx.params;
   try {
     const file = await getFileForDownload(user.id, id); // authz + audit
-    const { body } = await telegram().openDownloadStream(file.tgFileId!);
+    const { body, repaired } = await telegram().openDownloadStream(file.tgFileId!);
+    if (repaired) {
+      // Stale reference healed — persist the fresh ids (best-effort).
+      await repairFileReferences(file.id, repaired).catch(() => {});
+    }
     const decoded = await decodeDownloadStream(body);
     const inline = new URL(req.url).searchParams.get("inline") === "1";
     return new Response(decoded, {

@@ -14,9 +14,13 @@ export type AuditAction =
   | "file.move"
   | "file.star"
   | "file.download"
+  | "file.repair"
   | "file.trash"
   | "file.restore"
   | "file.purge"
+  | "share.create"
+  | "share.revoke"
+  | "share.download"
   | "folder.create"
   | "folder.rename"
   | "folder.move"
@@ -35,9 +39,12 @@ const STATE_TRACKED = new Set<AuditAction>([
   "file.rename",
   "file.move",
   "file.star",
+  "file.repair",
   "file.trash",
   "file.restore",
   "file.purge",
+  "share.create",
+  "share.revoke",
   "folder.create",
   "folder.rename",
   "folder.move",

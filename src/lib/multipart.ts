@@ -24,46 +24,52 @@ function escapeFilename(name: string): string {
 }
 
 /**
- * Build a multipart body ReadableStream: leading form fields, then the file
- * part streamed through, then the closing boundary.
+ * Build a multipart body ReadableStream: leading form fields, then (optionally)
+ * the file part streamed through, then the closing boundary. Omitting `file`
+ * produces a fields-only body (e.g. Bot API calls that pass a file_id string
+ * instead of uploading bytes).
  */
 export function buildMultipartStream(
   boundary: string,
   fields: Record<string, string>,
-  file: MultipartFilePart,
+  file?: MultipartFilePart,
 ): ReadableStream<Uint8Array> {
   let prelude = "";
   for (const [name, value] of Object.entries(fields)) {
     prelude += `--${boundary}${CRLF}Content-Disposition: form-data; name="${escapeFilename(name)}"${CRLF}${CRLF}${value}${CRLF}`;
   }
-  prelude +=
-    `--${boundary}${CRLF}` +
-    `Content-Disposition: form-data; name="${escapeFilename(file.name)}"; filename="${escapeFilename(file.filename)}"${CRLF}` +
-    `Content-Type: ${file.contentType}${CRLF}${CRLF}`;
+  if (file) {
+    prelude +=
+      `--${boundary}${CRLF}` +
+      `Content-Disposition: form-data; name="${escapeFilename(file.name)}"; filename="${escapeFilename(file.filename)}"${CRLF}` +
+      `Content-Type: ${file.contentType}${CRLF}${CRLF}`;
+  }
   const closing = textChunk(`${CRLF}--${boundary}--${CRLF}`);
   const preludeChunk = textChunk(prelude);
 
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       controller.enqueue(preludeChunk);
-      const reader = file.stream.getReader();
-      try {
-        for (;;) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          if (value) controller.enqueue(value);
+      if (file) {
+        const reader = file.stream.getReader();
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            if (value) controller.enqueue(value);
+          }
+        } catch (err) {
+          controller.error(err);
+          reader.releaseLock();
+          return;
         }
-      } catch (err) {
-        controller.error(err);
         reader.releaseLock();
-        return;
       }
-      reader.releaseLock();
       controller.enqueue(closing);
       controller.close();
     },
     cancel(reason) {
-      file.stream.cancel(reason).catch(() => {});
+      file?.stream.cancel(reason).catch(() => {});
     },
   });
 }

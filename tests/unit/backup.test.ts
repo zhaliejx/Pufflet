@@ -83,6 +83,19 @@ const SAMPLE: SnapshotData = {
       createdAt: "2026-01-04T00:00:00.000Z",
     },
   ],
+  shareLinks: [
+    {
+      id: "s1",
+      token: "AbC123_-token",
+      fileId: "file1",
+      createdBy: "u1",
+      createdAt: "2026-01-05T00:00:00.000Z",
+      revokedAt: null,
+      expiresAt: null,
+      downloads: 3,
+      lastDownloadAt: "2026-01-06T00:00:00.000Z",
+    },
+  ],
 };
 
 // Minimal fake Prisma transaction client that records every call in order.
@@ -106,6 +119,7 @@ function fakeTx() {
       auditEvent: model("auditEvent"),
       uploadJob: model("uploadJob"),
       session: model("session"),
+      shareLink: model("shareLink"),
       apiKey: model("apiKey"),
       file: model("file"),
       folder: model("folder"),
@@ -122,15 +136,26 @@ describe("snapshot serialize/parse", () => {
   });
   test("rejects unknown versions", () => {
     expect(() => parseSnapshot(JSON.stringify({ ...SAMPLE, version: 99 }))).toThrow(/version/i);
-    expect(() => parseSnapshot(JSON.stringify({ ...SAMPLE, version: 3 }))).toThrow(/version/i);
+    expect(() => parseSnapshot(JSON.stringify({ ...SAMPLE, version: 4 }))).toThrow(/version/i);
   });
-  test("accepts legacy v1 snapshots (pre-vault) with no settings", () => {
+  test("accepts legacy v1 snapshots (pre-vault) with no settings/share links", () => {
     const legacy = JSON.parse(JSON.stringify(SAMPLE)) as Record<string, unknown>;
     legacy.version = 1;
     delete legacy.settings;
+    delete legacy.shareLinks;
     const parsed = parseSnapshot(JSON.stringify(legacy));
     expect(parsed.version).toBe(1);
     expect(parsed.settings).toEqual([]);
+    expect(parsed.shareLinks).toEqual([]);
+  });
+  test("accepts legacy v2 snapshots (pre-share) and drops nothing else", () => {
+    const legacy = JSON.parse(JSON.stringify(SAMPLE)) as Record<string, unknown>;
+    legacy.version = 2;
+    delete legacy.shareLinks;
+    const parsed = parseSnapshot(JSON.stringify(legacy));
+    expect(parsed.version).toBe(2);
+    expect(parsed.settings).toEqual(SAMPLE.settings);
+    expect(parsed.shareLinks).toEqual([]);
   });
   test("rejects garbage", () => {
     expect(() => parseSnapshot("not json")).toThrow();
@@ -179,6 +204,11 @@ describe("applySnapshotData", () => {
     expect(calls.some((c) => c.model === "setting" && c.op === "deleteMany")).toBe(true);
     const settingCreate = calls.find((c) => c.model === "setting" && c.op === "create");
     expect((settingCreate!.args as { data: { key: string; value: string } }).data.key).toBe("vault.masterKey");
+
+    // share links wiped then restored verbatim (tokens keep working post-heal)
+    expect(calls.some((c) => c.model === "shareLink" && c.op === "deleteMany")).toBe(true);
+    const linkCreate = calls.find((c) => c.model === "shareLink" && c.op === "create");
+    expect((linkCreate!.args as { data: { id: string; token: string } }).data.token).toBe("AbC123_-token");
 
     // dates revived as Date objects
     expect(((userCreate!.args as { data: { createdAt: unknown } }).data.createdAt) instanceof Date).toBe(true);

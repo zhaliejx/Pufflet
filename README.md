@@ -42,6 +42,9 @@ Browser ──HTTPS──> Pufflet (Next.js) ──Bot API──> your private T
 - 📁 Nested folders with breadcrumbs, rename/move, **circular-nesting protection**
 - 📤 Streaming uploads (create-job → PUT raw bytes) with real progress, cancel,
   retry-able failure state, duplicate-name de-duplication, SHA-256 checksums
+- 🔗 **Public share links** — share any file with a no-login URL (`/s/<token>`),
+  with a branded download page, optional inline preview for images/video/PDF,
+  download counters, revocation, optional expiry, and per-IP rate limiting
 - 🔒 **Vault: encrypted + obfuscated storage** — files are AES-256-GCM encrypted,
   randomly padded, and stored under opaque names (`pf-….bin`) in your channel;
   downloads decrypt transparently with the original filename (legacy files keep
@@ -85,6 +88,23 @@ as a standalone server on any always-on host** (Render, Fly.io, a VPS — see
 raise both limits. Pufflet never uses undocumented
 behavior; `file_unique_id` is treated as an index key, never a download handle or
 content checksum (integrity uses SHA-256 computed while streaming).
+
+**How downloads actually work (verified against the server source + the pinned
+binary):** the hosted Bot API serves bytes over HTTP at
+`/file/bot<token>/<file_path>` (≤ 20 MB). The **Local Bot API server has no
+such HTTP route at all** — it answers `404 Not Found`. In `--local` mode,
+`getFile` instead returns the file's **absolute path on disk** (the server
+re-downloads the file from Telegram's cloud into its work dir first). Pufflet
+therefore reads local-mode downloads straight from the filesystem — which is
+why the compose stack mounts the `bot-api-data` volume into the app container
+at the same path, and why the all-in-one image works out of the box.
+
+Stale references self-heal: if `getFile` fails for an old file (e.g. the local
+server restarted and lost its file database), Pufflet re-sends the document
+**by `file_id`** — which re-registers it with the running server and yields a
+fresh `file_id` — retries the download transparently, persists the new
+Telegram references, and deletes the replaced message so the channel stays
+clean.
 
 Other notes:
 
@@ -442,6 +462,28 @@ Notes:
 - Changing `PUFFLET_ENCRYPTION_KEY` (or wiping the `Setting` row in auto mode)
   makes previously encrypted files undecryptable. The SHA-256 checksums are
   computed on plaintext, so you can always verify a download's integrity.
+
+### Share links — public downloads without an account
+
+Right-click any file (or open the ⋮ menu) → **Share** to create a public link:
+
+- The URL is a pure capability token: `/s/<43-char base64url>` — 32 random
+  bytes, unguessable, shown once to you and copied to your clipboard. Anyone
+  with the URL can download that one file **without logging in**; nothing else
+  on your drive is reachable through it.
+- Recipients get a branded download page with name, size and (for images,
+  videos and PDFs) an inline preview. Other types download as attachments.
+- Links can be **revoked** anytime in the same dialog, can carry an optional
+  expiry (`expiresInDays` via the API), and show a download counter.
+- Public downloads are rate-limited per IP (30/min), audited, counted on the
+  link row, and stream through the same vault-decoding pipeline as logged-in
+  downloads — recipients always get the original bytes.
+- Share links ride inside the state-backup snapshot (v3), so handed-out URLs
+  keep working after a self-heal on an ephemeral host.
+
+API (see `docs/API.md`): `POST/GET/DELETE /api/v1/files/{id}/share`, plus the
+public `GET /api/share/{token}` (metadata) and
+`GET /api/share/{token}/download` (bytes).
 
 ### Any host (bare Node/Bun)
 

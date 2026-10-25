@@ -59,6 +59,10 @@ services:
       # with a persistent volume; set "false" to rely on the volume alone)
       STATE_BACKUP: ${STATE_BACKUP:-true}
     volumes:
+      # The Local Bot API server serves downloads by ABSOLUTE PATH (it has no
+      # /file/bot… HTTP route). Mount its data volume at the SAME path inside
+      # the app container so getFile() paths resolve there too.
+      - bot-api-data:/var/lib/telegram-bot-api
       - pufflet-db:/app/db
     depends_on:
       - bot-api

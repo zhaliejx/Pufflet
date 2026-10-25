@@ -14,12 +14,161 @@ import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { FolderRow } from "./store";
 import { toast } from "sonner";
-import { AlertTriangle, FolderTree } from "lucide-react";
+import { AlertTriangle, Check, Copy, FolderTree, Link2, Loader2, Plus, Trash2 } from "lucide-react";
 
 export interface MoveTarget {
   type: "file" | "folder";
   id: string;
   name: string;
+}
+
+export interface ShareLinkView {
+  id: string;
+  urlPath: string;
+  createdAt: string;
+  expiresAt: string | null;
+  revokedAt: string | null;
+  downloads: number;
+  lastDownloadAt: string | null;
+}
+
+/**
+ * Public share links for one file. Anyone with a link can download the file
+ * WITHOUT logging in; links can be revoked at any time.
+ */
+export function ShareDialog({
+  target,
+  onClose,
+}: {
+  target: MoveTarget | null;
+  onClose: () => void;
+}) {
+  const [links, setLinks] = useState<ShareLinkView[] | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!target) return;
+    setLinks(null);
+    fetch(`/api/files/${target.id}/share`)
+      .then(async (res) => {
+        const body = await res.json().catch(() => null);
+        if (!res.ok) throw new Error(body?.error?.message ?? "Could not load share links");
+        setLinks(body.links ?? []);
+      })
+      .catch((err) => {
+        toast.error(err instanceof Error ? err.message : "Could not load share links");
+        setLinks([]);
+      });
+  }, [target]);
+
+  const active = (links ?? []).filter((l) => !l.revokedAt);
+
+  async function createLink() {
+    if (!target) return;
+    setBusy(true);
+    try {
+      const res = await fetch(`/api/files/${target.id}/share`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({}),
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(body?.error?.message ?? "Could not create share link");
+      setLinks((prev) => [body.link, ...(prev ?? [])]);
+      void copyLink(body.link);
+      toast.success("Public link created — URL copied");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not create share link");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function copyLink(link: ShareLinkView) {
+    const url = `${window.location.origin}${link.urlPath}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopiedId(link.id);
+      setTimeout(() => setCopiedId(null), 1500);
+    } catch {
+      toast.info(url);
+    }
+  }
+
+  async function revoke(link: ShareLinkView) {
+    if (!target) return;
+    try {
+      const res = await fetch(`/api/files/${target.id}/share?linkId=${encodeURIComponent(link.id)}`, {
+        method: "DELETE",
+      });
+      const body = await res.json().catch(() => null);
+      if (!res.ok) throw new Error(body?.error?.message ?? "Revoke failed");
+      setLinks((prev) => (prev ?? []).filter((l) => l.id !== link.id));
+      toast.success("Link revoked");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Revoke failed");
+    }
+  }
+
+  return (
+    <Dialog open={!!target} onOpenChange={(v) => !v && onClose()}>
+      <DialogContent className="max-w-md rounded-2xl">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2">
+            <Link2 className="h-5 w-5 text-[#6C9EF9]" /> Share “{target?.name}”
+          </DialogTitle>
+          <DialogDescription>
+            Public link — anyone who has it can download this file without an account. Revoke anytime.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-2 max-h-64 overflow-y-auto thin-scroll">
+          {links === null && (
+            <div className="flex items-center justify-center py-6 text-muted-foreground">
+              <Loader2 className="h-4 w-4 animate-spin" />
+            </div>
+          )}
+          {links !== null && active.length === 0 && (
+            <p className="text-sm text-muted-foreground py-2">No active links yet.</p>
+          )}
+          {active.map((link) => (
+            <div key={link.id} className="rounded-xl border bg-muted/40 px-3 py-2 flex items-center gap-2">
+              <Link2 className="h-4 w-4 shrink-0 text-muted-foreground" />
+              <span className="text-sm truncate flex-1" title={`${window.location.origin}${link.urlPath}`}>
+                {link.urlPath}
+              </span>
+              <span className="text-[11px] text-muted-foreground shrink-0">
+                {link.downloads} download{link.downloads === 1 ? "" : "s"}
+              </span>
+              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => copyLink(link)} aria-label="Copy link">
+                {copiedId === link.id ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
+              </Button>
+              <Button
+                variant="ghost"
+                size="icon"
+                className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                onClick={() => revoke(link)}
+                aria-label="Revoke link"
+              >
+                <Trash2 className="h-3.5 w-3.5" />
+              </Button>
+            </div>
+          ))}
+        </div>
+
+        <DialogFooter>
+          <Button variant="ghost" onClick={onClose}>
+            Close
+          </Button>
+          <Button onClick={createLink} disabled={busy} className="pufflet-gradient text-white border-0">
+            {busy ? <Loader2 className="h-4 w-4 animate-spin" /> : <Plus className="h-4 w-4" />}
+            Create link
+          </Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
+  );
 }
 
 export function NewFolderDialog({
