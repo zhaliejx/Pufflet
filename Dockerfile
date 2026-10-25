@@ -31,6 +31,19 @@ COPY . .
 ENV DATABASE_URL="file:/tmp/build.db"
 RUN bunx prisma generate && bun run build
 
+# Self-contained Prisma CLI for `db push` at boot. prisma -> @prisma/config
+# pulls a runtime dependency closure (effect, c12, fast-check, jiti, ...) that
+# does NOT live inside node_modules/prisma itself — copying prisma/@prisma
+# piecemeal crashed the container at startup ("Cannot find module 'effect'").
+# Let bun resolve the whole closure once, then graft in the main install's
+# @prisma/engines (pre-downloaded binaries, same locked version -> no
+# engine download at boot).
+RUN mkdir /prisma-cli && cd /prisma-cli \
+    && bun -e 'const fs=require("fs");const v=require("/app/node_modules/prisma/package.json").version;fs.writeFileSync("package.json",JSON.stringify({name:"pufflet-prisma-cli",private:true,dependencies:{prisma:v}}))' \
+    && bun install \
+    && rm -rf node_modules/@prisma/engines \
+    && cp -r /app/node_modules/@prisma/engines node_modules/@prisma/engines
+
 # ---- Local Bot API server binary (prebuilt, musl) ---------------------------
 FROM aiogram/telegram-bot-api:latest AS botapi
 
@@ -48,11 +61,11 @@ COPY --from=builder /app/.next/standalone ./
 COPY --from=builder /app/.next/static ./.next/static
 COPY --from=builder /app/public ./public
 
-# Prisma CLI + client + schema for `db push` on boot (keeps the DB in sync
-# without requiring a separate migrate step or the full node_modules).
+# Prisma CLI (full closure) + generated client + schema for `db push` on boot
+# (keeps the DB in sync without shipping the full node_modules). Merges into
+# the node_modules the standalone server already carries.
 COPY --from=builder /app/prisma ./prisma
-COPY --from=builder /app/node_modules/prisma ./node_modules/prisma
-COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
+COPY --from=builder /prisma-cli/node_modules ./node_modules
 COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 COPY docker/entrypoint.sh ./entrypoint.sh
 

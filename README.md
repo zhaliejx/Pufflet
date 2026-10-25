@@ -297,10 +297,48 @@ Notes:
 - Restarted/slept Spaces auto-restore from the pinned snapshot — never delete
   or unpin the `pufflet-state-backup.json` message in your storage chat.
 - First build takes ~5–10 minutes; later restarts are seconds.
-- Prefer a different free host? Render / Koyeb run the same image (set
-  `PORT` accordingly); everything behaves identically.
+- Prefer a different free host? Render (below) and Koyeb run the same image;
+  everything behaves identically.
 
-### Option C — Any Docker host (VPS, home server, Railway, Render paid)
+### Option B2 — Render (free tier, same all-in-one image)
+
+Render runs this repo's `Dockerfile` directly (runtime: **Docker**, detected
+automatically) — that's the same all-in-one image as Option B: app + optional
+embedded Local Bot API in one container. Free instances sleep after ~15 min
+idle and have an ephemeral disk; the **state backup** (below) restores the
+index on every wake-up.
+
+1. **New Web Service** → connect your fork/copy of this repo. Runtime
+   **Docker** is auto-detected from the `Dockerfile`; leave build/start
+   commands empty. Port detection is automatic (the image listens on `$PORT`,
+   default 7860). Optionally set the health check path to `/api/health`.
+2. **Environment** (Dashboard → *Environment*):
+   - `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` — always required.
+   - Already running your own Bot API server somewhere (e.g. another Render
+     service)? Add `TELEGRAM_API_BASE=https://your-bot-api.onrender.com` and
+     set `MAX_UPLOAD_MB` / `MAX_DOWNLOAD_MB` to what that server really
+     allows. Do **not** set `TELEGRAM_API_ID`/`TELEGRAM_API_HASH` in this
+     mode — the embedded server stays off.
+   - Want the embedded 2000 MB mode instead? Add `TELEGRAM_API_ID` +
+     `TELEGRAM_API_HASH` (from my.telegram.org) and **don't** set
+     `TELEGRAM_API_BASE` — the entrypoint spawns the Local Bot API on :8081
+     and raises both limits to 2000 MB. Requires the one-time `npm run
+     tg:logout` migration (see Option B, step 2).
+   - `DATABASE_URL` — leave unset (SQLite at `/app/db/pufflet.db`).
+3. **Deploy** → first build ~5–10 min → open the URL → sign in
+   `pufflet@pufflet.com` / `pufflet` → change the password in Settings.
+
+Notes:
+
+- On the free tier (ephemeral disk) the embedded Local Bot API keeps its file
+  cache in the container, so files uploaded through it stop downloading after
+  a restart/sleep — the index restores, but re-upload the bytes. Pointing at
+  an external Bot API server with a persistent disk avoids this; hosted
+  Telegram (`TELEGRAM_API_BASE` unset, no api id/hash) never loses files.
+- Paid instances can attach a **Disk** mounted at `/app/db` to persist the
+  SQLite database across deploys.
+
+### Option C — Any Docker host (VPS, home server, Railway)
 
 ```bash
 # compose stack: app + Local Bot API sidecar (2000 MB), port 3000
