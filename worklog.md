@@ -166,3 +166,21 @@ Work Log:
 Stage Summary:
 - User's Render env table should contain exactly: TELEGRAM_API_ID=34203910, TELEGRAM_API_HASH=<32-hex>, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID — and must DELETE TELEGRAM_API_BASE (Render proxy) or embedded limits/auto-config get bypassed
 - Critical pending step for user: one-time hosted logOut (bot still logged into hosted API) or local-server Telegram calls will 409/fail; old hosted file_ids die after logOut
+
+---
+Task ID: 18
+Agent: main (Z.ai)
+Task: User's Render deploy still shows "embedded telegram-bot-api exited immediately" (screenshot: f647f80 live, [bot-api] usage dump) — find exact trigger and fix
+
+Work Log:
+- Screenshot confirmed f647f80 deployed (error format "Its output:" + [bot-api] prefixes); pre-flight passed -> env values well-formed, so failure was inside the binary itself; trigger line scrolled off user's phone screenshot
+- Reproduced locally WITHOUT docker: pulled the real binary from aiogram/telegram-bot-api registry layers + musl loader/libstdc++/libssl/libcrypto/libz from Alpine CDN, ran on glibc via ld-musl --library-path
+- Exact trigger: binary (Bot API 10.3) prints "Option \"logverbosity\" is unrecognized" -> usage dump -> exit. 10.x renamed --logverbosity to -v/--verbosity; binary exits on ANY unrecognized option
+- Verified fix live: same binary + args minus --logverbosity -> process stays up, probe answers 404, and getMe with user's real token returns ok:true on the local server (user's api_id 34203910/api_hash valid; bot migration to local server already works — hosted logOut done or unnecessary)
+- Fixes: entrypoint drops --logverbosity (arg list now long-stable core flags only, comment warns to check --help of pinned version before adding new flags); Dockerfile pins aiogram/telegram-bot-api:10.3 (latest can remove flags again; 10.3 tag verified on Docker Hub)
+- Cleaned .botapi-sim artifacts; branch tests 8/8; committed 9641c5c, pushed main
+
+Stage Summary:
+- Root cause was NEVER the user's env values — Bot API 10.3 removed --logverbosity, which the entrypoint still passed
+- User action: Render will auto-deploy 9641c5c (or Manual Deploy); expect "using embedded Local Bot API (limits: 2000 MB up / 2000 MB down)" then Ready; Settings should show local (2000 MB)
+- Incident trail: effect module fix -> oversized api_id -> --logverbosity removal; entrypoint now guards all three classes (closure deps, bad env shapes, unknown-flag crash visibility)
