@@ -249,3 +249,15 @@ Work Log:
 Stage Summary:
 - Set DATABASE_URL to any postgres:// connection string (Render Internal URL or external with ?sslmode=require) and the index — users, password, folders, files, API keys, share links — persists across redeploys/sleeps; /api/health shows databaseProvider; empty external DB + pinned snapshot = automatic migration restore on first boot; file bytes were always durable in the storage chat
 - User action: Render -> New PostgreSQL (same region) -> add DATABASE_URL to the web service -> redeploy; keep STATE_BACKUP on as the off-site index backup
+
+---
+Task ID: 21-b (push addendum)
+Agent: main (Z.ai)
+Task: Deliver the 16-commit backlog to origin/main
+
+Work Log:
+- User supplied a GitHub PAT in chat; pushed main:main via explicit URL (4fdafa6..aabc81b, 16 commits incl. the whole Task 20 download-fix + share backlog and Task 21 external-DB support); token used ephemerally in the push URL only — never stored in git config, remotes, files, or the worklog; advised rotation since it transited chat history
+- origin/main now = aabc81b; Render auto-deploy will pick it up
+
+Stage Summary:
+- Backlog delivered: user's Render was running pre-Task-20 code (hence the persistent TG_DOWNLOAD 404); after this deploy the 404 fix + no-login share links + external-Postgres support all go live
