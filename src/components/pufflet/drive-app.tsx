@@ -30,6 +30,8 @@ import {
 } from "./store";
 import { FileList, RowTarget } from "./file-list";
 import { SettingsPanel } from "./settings-panel";
+import { PreviewDialog } from "./preview-dialog";
+import { ThemeToggle } from "./theme-toggle";
 import {
   ConfirmDialog,
   MoveDialog,
@@ -74,6 +76,7 @@ export function DriveApp({ user, onSignOut }: Props) {
   const [renameTarget, setRenameTarget] = useState<MoveTarget | null>(null);
   const [moveTarget, setMoveTarget] = useState<MoveTarget | null>(null);
   const [shareTarget, setShareTarget] = useState<MoveTarget | null>(null);
+  const [previewFile, setPreviewFile] = useState<FileRow | null>(null);
   const [confirm, setConfirm] = useState<{
     title: string;
     description: string;
@@ -139,6 +142,7 @@ export function DriveApp({ user, onSignOut }: Props) {
   // ---- row actions ----
   const actions = {
     onOpenFolder: (id: string) => drive.openFolder(id),
+    onPreview: (row: FileRow) => setPreviewFile(row),
     onDownload: (row: FileRow) => downloadFile(row.id),
     onShare: (t: RowTarget) => setShareTarget(t),
     onRename: (t: RowTarget) => setRenameTarget(t),
@@ -230,10 +234,10 @@ export function DriveApp({ user, onSignOut }: Props) {
     >
       {/* drag overlay */}
       {dragging && (
-        <div className="fixed inset-0 z-50 bg-[#283070]/20 backdrop-blur-[2px] flex items-center justify-center pointer-events-none">
-          <div className="rounded-3xl bg-white/95 shadow-xl px-10 py-8 flex flex-col items-center gap-3">
+        <div className="fixed inset-0 z-50 bg-primary/20 backdrop-blur-[2px] flex items-center justify-center pointer-events-none">
+          <div className="rounded-3xl bg-card/95 border shadow-xl px-10 py-8 flex flex-col items-center gap-3 animate-fade-up">
             <img src="/logo-icon.svg" alt="" className="w-20" />
-            <p className="font-brand font-semibold text-[#283070] text-lg">Drop to upload to Pufflet</p>
+            <p className="font-brand font-semibold text-brand-heading text-lg">Drop to upload to Pufflet</p>
           </div>
         </div>
       )}
@@ -292,6 +296,8 @@ export function DriveApp({ user, onSignOut }: Props) {
             }}
           />
 
+          <ThemeToggle />
+
           <DropdownMenu>
             <DropdownMenuTrigger asChild>
               <button
@@ -343,6 +349,14 @@ export function DriveApp({ user, onSignOut }: Props) {
       )}
 
       <div className="flex flex-1">
+        {/* mobile sidebar backdrop */}
+        {drive.sidebarOpen && (
+          <div
+            className="fixed inset-0 z-30 bg-black/40 backdrop-blur-[2px] md:hidden"
+            onClick={() => drive.setSidebar(false)}
+            aria-hidden
+          />
+        )}
         {/* sidebar */}
         <aside
           className={`${
@@ -430,7 +444,7 @@ export function DriveApp({ user, onSignOut }: Props) {
                   </BreadcrumbList>
                 </Breadcrumb>
               ) : (
-                <h1 className="font-brand text-2xl font-bold text-[#283070]">{viewTitle[drive.view]}</h1>
+                <h1 className="font-brand text-2xl font-bold text-brand-heading">{viewTitle[drive.view]}</h1>
               )}
             </div>
 
@@ -474,6 +488,8 @@ export function DriveApp({ user, onSignOut }: Props) {
               loading={drive.loading && !drive.booted}
               trashedView={drive.view === "trash"}
               actions={actions}
+              searchQuery={drive.view === "search" ? drive.searchQuery : undefined}
+              allFolders={drive.view === "search" ? drive.allFolders : undefined}
             />
           )}
         </main>
@@ -502,7 +518,7 @@ export function DriveApp({ user, onSignOut }: Props) {
                   <span className="flex items-center gap-1.5 shrink-0">
                     {u.status === "done" && <CheckCircle2 className="h-4 w-4 text-emerald-500" />}
                     {(u.status === "uploading" || u.status === "creating" || u.status === "processing") && (
-                      <Loader2 className="h-4 w-4 animate-spin text-[#6C9EF9]" />
+                      <Loader2 className="h-4 w-4 animate-spin text-primary" />
                     )}
                     {(u.status === "failed" || u.status === "canceled") && (
                       <XCircle className="h-4 w-4 text-destructive" />
@@ -549,6 +565,7 @@ export function DriveApp({ user, onSignOut }: Props) {
       <RenameDialog target={renameTarget} onClose={() => setRenameTarget(null)} onRenamed={refresh} />
       <MoveDialog target={moveTarget} folders={drive.allFolders} onClose={() => setMoveTarget(null)} onMoved={refresh} />
       <ShareDialog target={shareTarget} onClose={() => setShareTarget(null)} />
+      <PreviewDialog file={previewFile} onClose={() => setPreviewFile(null)} />
       {confirm && (
         <ConfirmDialog
           open

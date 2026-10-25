@@ -44,6 +44,19 @@
   --radius-xl: calc(var(--radius) + 4px);
 }
 
+/*
+ * Pufflet themes ----------------------------------------------------------
+ * Five complete themes, all driven by the same variable contract:
+ *   light    — crisp daylight (default), Pufflet navy primary
+ *   dark     — deep navy-tinted dark, brand blue primary
+ *   midnight — OLED black with violet accents
+ *   sepia    — warm paper light for long sessions
+ * "System" resolves to light/dark via next-themes. Every custom theme defines
+ * the FULL variable set (no .dark inheritance), so any theme can be selected
+ * independently.
+ */
+
+/* ---- light (default) ---- */
 :root {
   --radius: 0.75rem;
   --background: oklch(0.995 0.002 260);
@@ -79,40 +92,129 @@
   --sidebar-accent-foreground: oklch(0.3 0.08 268);
   --sidebar-border: oklch(0.915 0.015 265);
   --sidebar-ring: oklch(0.65 0.15 255);
+  /* brand gradient (buttons, avatar, upload CTA) */
+  --brand-from: #6c9ef9;
+  --brand-to: #9f7df3;
+  --brand-text: #283070; /* headings on light surfaces */
+  --scrollbar-thumb: oklch(0.85 0.02 265);
 }
 
+/* ---- dark (navy-tinted) ---- */
 .dark {
-  --background: oklch(0.145 0 0);
-  --foreground: oklch(0.985 0 0);
-  --card: oklch(0.205 0 0);
-  --card-foreground: oklch(0.985 0 0);
-  --popover: oklch(0.205 0 0);
-  --popover-foreground: oklch(0.985 0 0);
-  --primary: oklch(0.922 0 0);
-  --primary-foreground: oklch(0.205 0 0);
-  --secondary: oklch(0.269 0 0);
-  --secondary-foreground: oklch(0.985 0 0);
-  --muted: oklch(0.269 0 0);
-  --muted-foreground: oklch(0.708 0 0);
-  --accent: oklch(0.269 0 0);
-  --accent-foreground: oklch(0.985 0 0);
-  --destructive: oklch(0.704 0.191 22.216);
-  --border: oklch(1 0 0 / 10%);
-  --input: oklch(1 0 0 / 15%);
-  --ring: oklch(0.556 0 0);
-  --chart-1: oklch(0.488 0.243 264.376);
-  --chart-2: oklch(0.696 0.17 162.48);
-  --chart-3: oklch(0.769 0.188 70.08);
-  --chart-4: oklch(0.627 0.265 303.9);
-  --chart-5: oklch(0.645 0.246 16.439);
-  --sidebar: oklch(0.205 0 0);
-  --sidebar-foreground: oklch(0.985 0 0);
-  --sidebar-primary: oklch(0.488 0.243 264.376);
-  --sidebar-primary-foreground: oklch(0.985 0 0);
-  --sidebar-accent: oklch(0.269 0 0);
-  --sidebar-accent-foreground: oklch(0.985 0 0);
-  --sidebar-border: oklch(1 0 0 / 10%);
-  --sidebar-ring: oklch(0.556 0 0);
+  --background: oklch(0.17 0.02 270);
+  --foreground: oklch(0.95 0.01 260);
+  --card: oklch(0.21 0.025 270);
+  --card-foreground: oklch(0.95 0.01 260);
+  --popover: oklch(0.21 0.025 270);
+  --popover-foreground: oklch(0.95 0.01 260);
+  --primary: oklch(0.72 0.13 255);
+  --primary-foreground: oklch(0.16 0.03 270);
+  --secondary: oklch(0.27 0.03 268);
+  --secondary-foreground: oklch(0.95 0.01 260);
+  --muted: oklch(0.26 0.025 268);
+  --muted-foreground: oklch(0.68 0.03 265);
+  --accent: oklch(0.3 0.06 260);
+  --accent-foreground: oklch(0.93 0.02 260);
+  --destructive: oklch(0.68 0.19 25);
+  --border: oklch(0.31 0.03 268);
+  --input: oklch(0.33 0.03 268);
+  --ring: oklch(0.6 0.13 255);
+  --chart-1: oklch(0.72 0.13 255);
+  --chart-2: oklch(0.68 0.15 300);
+  --chart-3: oklch(0.75 0.14 200);
+  --chart-4: oklch(0.72 0.16 85);
+  --chart-5: oklch(0.65 0.17 25);
+  --sidebar: oklch(0.19 0.025 270);
+  --sidebar-foreground: oklch(0.93 0.01 260);
+  --sidebar-primary: oklch(0.72 0.13 255);
+  --sidebar-primary-foreground: oklch(0.16 0.03 270);
+  --sidebar-accent: oklch(0.28 0.05 262);
+  --sidebar-accent-foreground: oklch(0.95 0.01 260);
+  --sidebar-border: oklch(0.29 0.03 268);
+  --sidebar-ring: oklch(0.6 0.13 255);
+  --brand-from: #5f93f7;
+  --brand-to: #a98df5;
+  --brand-text: oklch(0.9 0.02 260);
+  --scrollbar-thumb: oklch(0.38 0.03 268);
+}
+
+/* ---- midnight (OLED black + violet) ---- */
+.midnight {
+  --background: oklch(0.09 0.008 290);
+  --foreground: oklch(0.94 0.01 290);
+  --card: oklch(0.13 0.012 290);
+  --card-foreground: oklch(0.94 0.01 290);
+  --popover: oklch(0.13 0.012 290);
+  --popover-foreground: oklch(0.94 0.01 290);
+  --primary: oklch(0.7 0.17 300);
+  --primary-foreground: oklch(0.1 0.02 290);
+  --secondary: oklch(0.18 0.02 290);
+  --secondary-foreground: oklch(0.94 0.01 290);
+  --muted: oklch(0.17 0.015 290);
+  --muted-foreground: oklch(0.62 0.03 292);
+  --accent: oklch(0.22 0.05 295);
+  --accent-foreground: oklch(0.93 0.02 295);
+  --destructive: oklch(0.66 0.2 20);
+  --border: oklch(0.22 0.02 292);
+  --input: oklch(0.24 0.02 292);
+  --ring: oklch(0.6 0.16 300);
+  --chart-1: oklch(0.7 0.17 300);
+  --chart-2: oklch(0.72 0.13 255);
+  --chart-3: oklch(0.75 0.14 200);
+  --chart-4: oklch(0.72 0.16 85);
+  --chart-5: oklch(0.65 0.17 25);
+  --sidebar: oklch(0.07 0.008 290);
+  --sidebar-foreground: oklch(0.92 0.01 290);
+  --sidebar-primary: oklch(0.7 0.17 300);
+  --sidebar-primary-foreground: oklch(0.1 0.02 290);
+  --sidebar-accent: oklch(0.2 0.05 295);
+  --sidebar-accent-foreground: oklch(0.93 0.02 295);
+  --sidebar-border: oklch(0.2 0.02 292);
+  --sidebar-ring: oklch(0.6 0.16 300);
+  --brand-from: #8f7df3;
+  --brand-to: #c084fc;
+  --brand-text: oklch(0.92 0.02 295);
+  --scrollbar-thumb: oklch(0.28 0.03 292);
+}
+
+/* ---- sepia (warm paper) ---- */
+.sepia {
+  --radius: 0.75rem;
+  --background: oklch(0.97 0.014 85);
+  --foreground: oklch(0.33 0.035 70);
+  --card: oklch(0.99 0.008 85);
+  --card-foreground: oklch(0.33 0.035 70);
+  --popover: oklch(0.99 0.008 85);
+  --popover-foreground: oklch(0.33 0.035 70);
+  --primary: oklch(0.42 0.07 60);
+  --primary-foreground: oklch(0.98 0.01 85);
+  --secondary: oklch(0.93 0.02 82);
+  --secondary-foreground: oklch(0.38 0.06 62);
+  --muted: oklch(0.93 0.018 82);
+  --muted-foreground: oklch(0.52 0.04 70);
+  --accent: oklch(0.9 0.045 78);
+  --accent-foreground: oklch(0.4 0.07 62);
+  --destructive: oklch(0.55 0.2 27);
+  --border: oklch(0.88 0.022 80);
+  --input: oklch(0.88 0.022 80);
+  --ring: oklch(0.65 0.1 65);
+  --chart-1: oklch(0.65 0.12 65);
+  --chart-2: oklch(0.62 0.1 45);
+  --chart-3: oklch(0.5 0.07 110);
+  --chart-4: oklch(0.72 0.12 85);
+  --chart-5: oklch(0.6 0.14 30);
+  --sidebar: oklch(0.945 0.018 82);
+  --sidebar-foreground: oklch(0.33 0.035 70);
+  --sidebar-primary: oklch(0.42 0.07 60);
+  --sidebar-primary-foreground: oklch(0.98 0.01 85);
+  --sidebar-accent: oklch(0.9 0.045 78);
+  --sidebar-accent-foreground: oklch(0.4 0.07 62);
+  --sidebar-border: oklch(0.88 0.022 80);
+  --sidebar-ring: oklch(0.65 0.1 65);
+  --brand-from: #e0954f;
+  --brand-to: #c26d5a;
+  --brand-text: oklch(0.38 0.07 62);
+  --scrollbar-thumb: oklch(0.83 0.03 80);
 }
 
 @layer base {
@@ -129,15 +231,29 @@
   font-family: var(--font-brand), ui-rounded, "Baloo 2", system-ui, sans-serif;
 }
 
+/* Headings/wordmark color that adapts per theme (was hard-coded #283070). */
+.text-brand-heading {
+  color: var(--brand-text);
+}
+
 .pufflet-gradient {
-  background-image: linear-gradient(135deg, #6c9ef9 0%, #9f7df3 100%);
+  background-image: linear-gradient(135deg, var(--brand-from) 0%, var(--brand-to) 100%);
 }
 
 .pufflet-gradient-text {
-  background-image: linear-gradient(135deg, #4e8cf8 20%, #9f7df3 90%);
+  background-image: linear-gradient(135deg, var(--brand-from) 20%, var(--brand-to) 90%);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
+}
+
+/* Brand-tinted folder/file icon colors that adapt to the active theme. */
+.icon-folder {
+  color: var(--brand-from);
+  fill: color-mix(in oklab, var(--brand-from) 22%, transparent);
+}
+.icon-file {
+  color: var(--brand-to);
 }
 
 /* soft scrollbars for long lists */
@@ -146,9 +262,31 @@
   height: 8px;
 }
 .thin-scroll::-webkit-scrollbar-thumb {
-  background: oklch(0.85 0.02 265);
+  background: var(--scrollbar-thumb);
   border-radius: 999px;
 }
 .thin-scroll::-webkit-scrollbar-track {
   background: transparent;
+}
+
+/* Gentle entrance animation for cards/dialogs/lists */
+@keyframes pufflet-fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.animate-fade-up {
+  animation: pufflet-fade-up 0.28s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+/* Checkerboard-free neutral surface behind media previews */
+.preview-surface {
+  background:
+    radial-gradient(circle at 30% 20%, color-mix(in oklab, var(--brand-from) 7%, transparent), transparent 60%),
+    color-mix(in oklab, var(--muted) 65%, var(--background));
 }

@@ -2,6 +2,7 @@ import type { Metadata } from "next";
 import { Baloo_2, Nunito } from "next/font/google";
 import "./globals.css";
 import { Toaster } from "@/components/ui/sonner";
+import { ThemeProvider } from "@/components/pufflet/theme-provider";
 
 const baloo = Baloo_2({
   variable: "--font-brand",
@@ -36,9 +37,11 @@ export default function RootLayout({
 }>) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body className={`${baloo.variable} ${nunito.variable} font-body antialiased bg-background text-foreground`}>
-        {children}
-        <Toaster richColors position="top-center" />
+      <body className={`${baloo.variable} ${nunito.variable} antialiased bg-background text-foreground`}>
+        <ThemeProvider>
+          {children}
+          <Toaster richColors position="top-center" />
+        </ThemeProvider>
       </body>
     </html>
   );

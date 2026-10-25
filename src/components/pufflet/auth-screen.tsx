@@ -45,13 +45,13 @@ export function AuthScreen({ needsSetup, defaultUserActive, onDone }: Props) {
     <div className="min-h-screen flex flex-col items-center justify-center gap-8 px-4 bg-gradient-to-b from-[#f4f7ff] to-white">
       <div className="flex flex-col items-center gap-3 select-none">
         <img src="/logo-icon.svg" alt="Pufflet cloud mascot" className="w-40 h-auto drop-shadow-sm" />
-        <h1 className="font-brand text-5xl font-bold text-[#283070] tracking-tight">Pufflet</h1>
+        <h1 className="font-brand text-5xl font-bold text-brand-heading tracking-tight">Pufflet</h1>
         <p className="text-muted-foreground -mt-2">Your personal cloud, with a friendly face.</p>
       </div>
 
       <Card className="w-full max-w-sm rounded-2xl border-border/70 shadow-sm">
         <CardHeader className="space-y-1">
-          <CardTitle className="text-xl font-brand text-[#283070]">
+          <CardTitle className="text-xl font-brand text-brand-heading">
             {mode === "setup" ? "Create your owner account" : "Welcome back"}
           </CardTitle>
           <CardDescription>

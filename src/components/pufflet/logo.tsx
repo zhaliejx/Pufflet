@@ -74,7 +74,7 @@ export function PuffletIcon({ className }: { className?: string }) {
 
 export function PuffletWordmark({ className }: { className?: string }) {
   return (
-    <span className={`font-brand font-bold tracking-tight text-[#283070] ${className ?? ""}`}>
+    <span className={`font-brand font-bold tracking-tight text-brand-heading ${className ?? ""}`}>
       Pufflet
     </span>
   );

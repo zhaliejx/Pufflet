@@ -116,7 +116,7 @@ export function ShareDialog({
       <DialogContent className="max-w-md rounded-2xl">
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2">
-            <Link2 className="h-5 w-5 text-[#6C9EF9]" /> Share “{target?.name}”
+            <Link2 className="h-5 w-5 text-primary" /> Share “{target?.name}”
           </DialogTitle>
           <DialogDescription>
             Public link — anyone who has it can download this file without an account. Revoke anytime.

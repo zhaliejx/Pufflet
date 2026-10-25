@@ -9,6 +9,9 @@ import { Badge } from "@/components/ui/badge";
 import { Checkbox } from "@/components/ui/checkbox";
 import { formatBytes, formatDate } from "@/lib/format";
 import { apiCall } from "./store";
+import { useTheme } from "next-themes";
+import { THEME_OPTIONS, useMounted } from "./theme-provider";
+import { ThemeIcon } from "./theme-toggle";
 import { toast } from "sonner";
 import {
   BadgeCheck,
@@ -16,11 +19,14 @@ import {
   CloudOff,
   Copy,
   DatabaseBackup,
+  History,
   KeyRound,
+  Palette,
   Plus,
   Server,
   ShieldAlert,
   Trash2,
+  Undo2,
 } from "lucide-react";
 import {
   Dialog,
@@ -30,6 +36,16 @@ import {
   DialogHeader,
   DialogTitle,
 } from "@/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import {
   Select,
   SelectContent,
@@ -75,6 +91,14 @@ interface BackupStatus {
   lastBackupAt: string | null;
   lastBackupSize: number;
   lastError: string | null;
+  checkpoints?: number;
+  lastCheckpointAt?: string | null;
+}
+
+interface BackupHistory {
+  pinned: { found: boolean; messageId?: string; fileName?: string; fileSize?: number };
+  checkpoints: { messageId: string; fileId: string; at: string; size: number; files: number; users: number }[];
+  hotMessageKnown: boolean;
 }
 
 interface Props {
@@ -88,6 +112,9 @@ export function SettingsPanel({ user }: Props) {
   const [stats, setStats] = useState<StatsResponse | null>(null);
   const [backup, setBackup] = useState<BackupStatus | null>(null);
   const [backupBusy, setBackupBusy] = useState(false);
+  const [history, setHistory] = useState<BackupHistory | null>(null);
+  const [restoreTarget, setRestoreTarget] = useState<{ source: "pinned" | "checkpoint"; messageId?: string; label: string } | null>(null);
+  const [restoreBusy, setRestoreBusy] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const [newName, setNewName] = useState("");
   const [newScopes, setNewScopes] = useState<string[]>(["read"]);
@@ -103,14 +130,16 @@ export function SettingsPanel({ user }: Props) {
 
   const load = useCallback(async () => {
     try {
-      const [k, s, b] = await Promise.all([
+      const [k, s, b, h] = await Promise.all([
         apiCall<{ keys: KeyRow[] }>("/api/keys"),
         apiCall<StatsResponse>("/api/stats"),
         apiCall<BackupStatus>("/api/backup"),
+        apiCall<BackupHistory>("/api/backup/history").catch(() => null),
       ]);
       setKeys(k.keys);
       setStats(s);
       setBackup(b);
+      setHistory(h);
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not load settings");
     }
@@ -163,6 +192,25 @@ export function SettingsPanel({ user }: Props) {
     }
   }
 
+  async function restoreNow() {
+    if (!restoreTarget) return;
+    setRestoreBusy(true);
+    try {
+      const res = await apiCall<{ exportedAt: string; counts: { files: number; users: number } }>("/api/backup/restore", {
+        method: "POST",
+        body: JSON.stringify({ source: restoreTarget.source, messageId: restoreTarget.messageId }),
+      });
+      toast.success(`Restored ${res.counts.files} file(s) from the ${res.exportedAt.slice(0, 10)} snapshot`);
+      setRestoreTarget(null);
+      setTimeout(() => window.location.reload(), 800);
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Restore failed");
+      await load();
+    } finally {
+      setRestoreBusy(false);
+    }
+  }
+
   async function changePassword(e: React.FormEvent) {
     e.preventDefault();
     if (newPw.length < 8) {
@@ -191,11 +239,14 @@ export function SettingsPanel({ user }: Props) {
 
   return (
     <div className="space-y-6 max-w-3xl">
+      {/* Appearance / theme picker */}
+      <AppearanceCard />
+
       {/* Account / password */}
       <Card className="rounded-2xl">
         <CardHeader className="flex-row items-start justify-between space-y-0">
           <div className="space-y-1.5">
-            <CardTitle className="font-brand text-[#283070] flex items-center gap-2">
+            <CardTitle className="font-brand text-brand-heading flex items-center gap-2">
               <BadgeCheck className="h-5 w-5" /> Account
             </CardTitle>
             <CardDescription>
@@ -266,7 +317,7 @@ export function SettingsPanel({ user }: Props) {
       {/* Storage overview */}
       <Card className="rounded-2xl">
         <CardHeader>
-          <CardTitle className="font-brand text-[#283070]">Storage overview</CardTitle>
+          <CardTitle className="font-brand text-brand-heading">Storage overview</CardTitle>
           <CardDescription>Live totals from your Pufflet metadata database.</CardDescription>
         </CardHeader>
         <CardContent className="grid grid-cols-2 sm:grid-cols-4 gap-3">
@@ -277,7 +328,7 @@ export function SettingsPanel({ user }: Props) {
             { label: "In trash", value: stats ? String(stats.trash) : "…" },
           ].map((s) => (
             <div key={s.label} className="rounded-xl bg-muted/60 p-4 text-center">
-              <p className="text-2xl font-brand font-bold text-[#283070]">{s.value}</p>
+              <p className="text-2xl font-brand font-bold text-brand-heading">{s.value}</p>
               <p className="text-xs text-muted-foreground mt-1">{s.label}</p>
             </div>
           ))}
@@ -295,7 +346,7 @@ export function SettingsPanel({ user }: Props) {
       {/* Telegram status */}
       <Card className="rounded-2xl">
         <CardHeader>
-          <CardTitle className="font-brand text-[#283070] flex items-center gap-2">
+          <CardTitle className="font-brand text-brand-heading flex items-center gap-2">
             {stats?.telegram.ok ? (
               <CloudCheck className="h-5 w-5 text-emerald-500" />
             ) : (
@@ -330,7 +381,7 @@ export function SettingsPanel({ user }: Props) {
       <Card className="rounded-2xl">
         <CardHeader className="flex-row items-start justify-between space-y-0">
           <div className="space-y-1.5">
-            <CardTitle className="font-brand text-[#283070] flex items-center gap-2">
+            <CardTitle className="font-brand text-brand-heading flex items-center gap-2">
               <DatabaseBackup className="h-5 w-5" /> Data safety
               {backup?.enabled && backup.telegramConfigured ? (
                 <Badge className="bg-emerald-100 text-emerald-800 border border-emerald-200 hover:bg-emerald-100">
@@ -377,6 +428,66 @@ export function SettingsPanel({ user }: Props) {
               </p>
             </div>
           </div>
+
+          {/* Previous good backups (cold checkpoints) */}
+          {(history?.pinned.found || (history?.checkpoints.length ?? 0) > 0) && (
+            <div className="rounded-xl border p-4 space-y-3">
+              <div className="flex items-center justify-between gap-3">
+                <p className="text-sm font-medium flex items-center gap-2">
+                  <History className="h-4 w-4 text-muted-foreground" /> Previous backups
+                </p>
+                <span className="text-xs text-muted-foreground">
+                  {history?.pinned.found ? "pinned snapshot" : "no pinned snapshot"}
+                  {history?.checkpoints.length ? ` + ${history.checkpoints.length} checkpoint(s)` : ""}
+                </span>
+              </div>
+              <div className="space-y-1.5">
+                {history?.pinned.found && (
+                  <div className="flex items-center justify-between gap-3 rounded-lg bg-muted/50 px-3 py-2">
+                    <div className="min-w-0 text-sm">
+                      <p className="font-medium truncate">Current snapshot (pinned)</p>
+                      <p className="text-xs text-muted-foreground">
+                        {history.pinned.fileSize ? formatBytes(history.pinned.fileSize) : "size unknown"} · restored on boot when the database is empty
+                      </p>
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 shrink-0 rounded-lg"
+                      disabled={restoreBusy}
+                      onClick={() => setRestoreTarget({ source: "pinned", label: "the current pinned snapshot" })}
+                    >
+                      <Undo2 className="h-3.5 w-3.5" /> Restore
+                    </Button>
+                  </div>
+                )}
+                {history?.checkpoints.map((cp) => (
+                  <div key={cp.messageId} className="flex items-center justify-between gap-3 rounded-lg px-3 py-2">
+                    <div className="min-w-0 text-sm">
+                      <p className="font-medium">Checkpoint · {formatDate(cp.at)}</p>
+                      <p className="text-xs text-muted-foreground">
+                        {formatBytes(cp.size)} · {cp.files} file(s) · {cp.users} user(s)
+                      </p>
+                    </div>
+                    <Button
+                      variant="outline"
+                      size="sm"
+                      className="h-7 shrink-0 rounded-lg"
+                      disabled={restoreBusy}
+                      onClick={() => setRestoreTarget({ source: "checkpoint", messageId: cp.messageId, label: `the checkpoint from ${formatDate(cp.at)}` })}
+                    >
+                      <Undo2 className="h-3.5 w-3.5" /> Restore
+                    </Button>
+                  </div>
+                ))}
+              </div>
+              <p className="text-[11px] text-muted-foreground">
+                A checkpoint is taken every 12 hours so a previous good copy survives a bad snapshot update.
+                Restoring overwrites the CURRENT index with the chosen backup.
+              </p>
+            </div>
+          )}
+
           {backup?.lastError && (
             <p className="text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
               {backup.lastError}
@@ -394,7 +505,7 @@ export function SettingsPanel({ user }: Props) {
       <Card className="rounded-2xl">
         <CardHeader className="flex-row items-center justify-between space-y-0">
           <div className="space-y-1.5">
-            <CardTitle className="font-brand text-[#283070] flex items-center gap-2">
+            <CardTitle className="font-brand text-brand-heading flex items-center gap-2">
               <KeyRound className="h-5 w-5" /> API keys
             </CardTitle>
             <CardDescription>
@@ -549,6 +660,103 @@ export function SettingsPanel({ user }: Props) {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Restore confirmation — restore is deliberate and destructive */}
+      <AlertDialog open={!!restoreTarget} onOpenChange={(v) => !v && setRestoreTarget(null)}>
+        <AlertDialogContent className="rounded-2xl">
+          <AlertDialogHeader>
+            <AlertDialogTitle>Restore from backup?</AlertDialogTitle>
+            <AlertDialogDescription>
+              This replaces the CURRENT index (users, folders, files, API keys, share links) with{" "}
+              {restoreTarget?.label ?? "the selected backup"}. Anything changed since that snapshot is
+              lost. The file bytes in your Telegram channel are never touched — files not present in the
+              backup become unindexed.
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={restoreBusy}>Cancel</AlertDialogCancel>
+            <AlertDialogAction
+              className="bg-destructive text-white hover:bg-destructive/90"
+              disabled={restoreBusy}
+              onClick={(e) => {
+                e.preventDefault();
+                void restoreNow();
+              }}
+            >
+              {restoreBusy ? "Restoring…" : "Restore backup"}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
+  );
+}
+
+/** Theme picker card: 5 themes as visual swatch cards; preference is saved
+ *  instantly (localStorage via next-themes) and applied app-wide. */
+function AppearanceCard() {
+  const { theme, setTheme } = useTheme();
+  const mounted = useMounted();
+
+  return (
+    <Card className="rounded-2xl">
+      <CardHeader>
+        <CardTitle className="font-brand text-brand-heading flex items-center gap-2">
+          <Palette className="h-5 w-5" /> Appearance
+        </CardTitle>
+        <CardDescription>
+          Pick how Pufflet looks. The choice is saved on this device; System follows your OS light/dark
+          setting automatically.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+          {THEME_OPTIONS.map((opt) => {
+            const active = mounted && theme === opt.value;
+            return (
+              <button
+                key={opt.value}
+                onClick={() => setTheme(opt.value)}
+                className={`rounded-xl border-2 p-2 text-center transition-all hover:-translate-y-0.5 hover:shadow-md ${
+                  active ? "border-primary shadow-sm" : "border-transparent bg-muted/40"
+                }`}
+                aria-pressed={active}
+              >
+                <ThemeSwatch value={opt.value} />
+                <span className="mt-2 flex items-center justify-center gap-1.5 text-xs font-medium">
+                  <ThemeIcon theme={opt.value} className="h-3.5 w-3.5" />
+                  {opt.label}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
+/** Miniature preview of a theme (background + brand gradient + text chips). */
+function ThemeSwatch({ value }: { value: string }) {
+  const palettes: Record<string, { bg: string; fg: string; from: string; to: string }> = {
+    light: { bg: "#f7f8fd", fg: "#2b2f55", from: "#6c9ef9", to: "#9f7df3" },
+    dark: { bg: "#171a2b", fg: "#eef0fa", from: "#5f93f7", to: "#a98df5" },
+    system: { bg: "linear-gradient(120deg,#f7f8fd 49.5%,#171a2b 50.5%)", fg: "#4b5178", from: "#6c9ef9", to: "#9f7df3" },
+    midnight: { bg: "#0b0b12", fg: "#e9e7f7", from: "#8f7df3", to: "#c084fc" },
+    sepia: { bg: "#f5efe2", fg: "#4a3f30", from: "#e0954f", to: "#c26d5a" },
+  };
+  const p = palettes[value] ?? palettes.light;
+  return (
+    <span
+      className="block h-14 w-full rounded-lg border border-black/10 relative overflow-hidden"
+      style={{ background: p.bg }}
+      aria-hidden
+    >
+      <span className="absolute left-1.5 top-1.5 h-2 w-8 rounded-full" style={{ backgroundImage: `linear-gradient(135deg, ${p.from}, ${p.to})` }} />
+      <span className="absolute left-1.5 bottom-1.5 flex gap-1">
+        <span className="h-3 w-3 rounded-sm" style={{ background: p.fg, opacity: 0.85 }} />
+        <span className="h-3 w-5 rounded-sm" style={{ background: p.fg, opacity: 0.4 }} />
+      </span>
+    </span>
   );
 }

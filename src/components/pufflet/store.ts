@@ -25,6 +25,39 @@ export interface FolderRow {
 
 export type ViewName = "folder" | "recent" | "starred" | "trash" | "search" | "settings";
 
+export type SortKey = "name-asc" | "name-desc" | "newest" | "oldest" | "size-desc" | "size-asc";
+export type ViewMode = "list" | "grid";
+
+export const SORT_LABELS: Record<SortKey, string> = {
+  "name-asc": "Name (A to Z)",
+  "name-desc": "Name (Z to A)",
+  newest: "Newest first",
+  oldest: "Oldest first",
+  "size-desc": "Largest first",
+  "size-asc": "Smallest first",
+};
+
+const SORT_STORAGE_KEY = "pufflet.sort";
+const VIEW_MODE_STORAGE_KEY = "pufflet.viewMode";
+
+function readStored<T extends string>(key: string, allowed: readonly T[], fallback: T): T {
+  if (typeof window === "undefined") return fallback;
+  try {
+    const v = window.localStorage.getItem(key) as T | null;
+    return v && (allowed as readonly string[]).includes(v) ? v : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+function writeStored(key: string, value: string) {
+  try {
+    window.localStorage.setItem(key, value);
+  } catch {
+    // private mode / storage disabled — preference just won't persist
+  }
+}
+
 export interface UploadItem {
   key: string;
   uploadId?: string;
@@ -48,6 +81,8 @@ interface DriveState {
   loading: boolean;
   uploads: UploadItem[];
   sidebarOpen: boolean;
+  sort: SortKey;
+  viewMode: ViewMode;
 
   setView: (v: ViewName) => void;
   setSearch: (q: string) => void;
@@ -58,6 +93,8 @@ interface DriveState {
   cancelUpload: (key: string) => void;
   dismissUpload: (key: string) => void;
   setSidebar: (open: boolean) => void;
+  setSort: (s: SortKey) => void;
+  setViewMode: (m: ViewMode) => void;
 }
 
 async function api<T>(url: string, init?: RequestInit): Promise<T> {
@@ -99,6 +136,18 @@ export const useDrive = create<DriveState>((set, get) => ({
   loading: false,
   uploads: [],
   sidebarOpen: false,
+  sort: readStored<SortKey>(SORT_STORAGE_KEY, ["name-asc", "name-desc", "newest", "oldest", "size-desc", "size-asc"], "name-asc"),
+  viewMode: readStored<ViewMode>(VIEW_MODE_STORAGE_KEY, ["list", "grid"], "list"),
+
+  setSort: (s) => {
+    writeStored(SORT_STORAGE_KEY, s);
+    set({ sort: s });
+  },
+
+  setViewMode: (m) => {
+    writeStored(VIEW_MODE_STORAGE_KEY, m);
+    set({ viewMode: m });
+  },
 
   setView: (v) => {
     set({ view: v, searchQuery: v === "search" ? get().searchQuery : "" });
