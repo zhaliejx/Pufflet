@@ -322,7 +322,9 @@ index on every wake-up.
    - Want the embedded 2000 MB mode instead? Add `TELEGRAM_API_ID` +
      `TELEGRAM_API_HASH` (from my.telegram.org) and **don't** set
      `TELEGRAM_API_BASE` — the entrypoint spawns the Local Bot API on :8081
-     and raises both limits to 2000 MB. Requires the one-time `npm run
+     and raises both limits to 2000 MB. `TELEGRAM_API_ID` must be the plain
+     numeric id (no quotes/spaces, not the hash) — the bot-api server refuses
+     to start otherwise. Requires the one-time `npm run
      tg:logout` migration (see Option B, step 2).
    - `DATABASE_URL` — leave unset (SQLite at `/app/db/pufflet.db`).
 3. **Deploy** → first build ~5–10 min → open the URL → sign in
