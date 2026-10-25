@@ -1,9 +1,13 @@
 "use client";
 
 // File & folder listing: list + grid modes, client-side sorting, click-to-
-// preview for files, image thumbnails in grid view, context menus, and
-// theme-aware styling. Icons are SVG (lucide) exclusively.
-import { useMemo } from "react";
+// preview for files, image thumbnails in grid view, context menus, multi-
+// select checkboxes, and theme-aware styling. Icons are SVG (lucide) only.
+//
+// Render performance: the component is memoized and all state it needs comes
+// in via props or narrow selectors — upload-progress ticks elsewhere in the
+// store never re-render the listing.
+import { memo, useMemo, useRef } from "react";
 import {
   ContextMenu,
   ContextMenuContent,
@@ -11,7 +15,17 @@ import {
   ContextMenuSeparator,
   ContextMenuTrigger,
 } from "@/components/ui/context-menu";
+import { Checkbox } from "@/components/ui/checkbox";
 import { Skeleton } from "@/components/ui/skeleton";
+import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import { formatBytes, formatDate, fileKind } from "@/lib/format";
 import { FileRow, FolderRow, SortKey, SORT_LABELS, useDrive } from "./store";
 import {
@@ -21,6 +35,7 @@ import {
   ArrowUpWideNarrow,
   CalendarArrowDown,
   CalendarArrowUp,
+  ChevronsDown,
   Eye,
   File,
   FileArchive,
@@ -41,21 +56,22 @@ import {
   Undo2,
   XCircle,
 } from "lucide-react";
-import { Button } from "@/components/ui/button";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@/components/ui/dropdown-menu";
 
 export interface RowTarget {
   type: "file" | "folder";
   id: string;
   name: string;
   starred?: boolean;
+}
+
+export interface SelectionApi {
+  files: Set<string>;
+  folders: Set<string>;
+  has: (type: "file" | "folder", id: string) => boolean;
+  count: number;
+  toggle: (type: "file" | "folder", id: string, opts?: { shift?: boolean; orderedIds?: string[] }) => void;
+  selectAll: (fileIds: string[], folderIds: string[]) => void;
+  clear: () => void;
 }
 
 const KIND_ICONS: Record<string, React.ComponentType<{ className?: string }>> = {
@@ -105,7 +121,7 @@ function sortRows<T extends { name: string; size?: number; updatedAt?: string; c
     case "size-desc":
       return sorted.sort((a, b) => bySize(b, a));
     case "size-asc":
-      return sorted.sort(bySize);
+      return sorted.sort((a, b) => bySize(a, b));
     default:
       return sorted;
   }
@@ -138,6 +154,45 @@ function ActionMenu({
   previewable?: boolean;
 }) {
   return (
+    <DropdownShell>
+      {trashed ? (
+        <>
+          <MenuRow icon={Undo2} label="Restore" onClick={() => actions.onRestore(target)} destructive={false} />
+          <MenuRow icon={XCircle} label="Delete forever" onClick={() => actions.onPurge(target)} destructive />
+        </>
+      ) : (
+        <>
+          {target.type === "file" && previewable && (
+            <MenuRow icon={Eye} label="Preview" onClick={() => actions.onPreview(target as unknown as FileRow)} />
+          )}
+          {target.type === "file" && (
+            <MenuRow icon={Download} label="Download" onClick={() => actions.onDownload(target as unknown as FileRow)} />
+          )}
+          {target.type === "folder" && (
+            <MenuRow icon={FolderIcon} label="Open" onClick={() => actions.onOpenFolder(target.id)} />
+          )}
+          {target.type === "file" && <MenuRow icon={Link2} label="Share" onClick={() => actions.onShare(target)} />}
+          <MenuRow icon={Pencil} label="Rename" onClick={() => actions.onRename(target)} />
+          <MenuRow icon={FolderInput} label="Move to…" onClick={() => actions.onMove(target)} />
+          {target.type === "file" && (
+            <MenuRow
+              icon={Star}
+              label={starred ? "Remove star" : "Star"}
+              onClick={() => actions.onStar(target as unknown as FileRow)}
+              starActive={starred}
+            />
+          )}
+          <DropdownMenuSeparator />
+          <MenuRow icon={Trash2} label="Move to trash" onClick={() => actions.onTrash(target)} destructive />
+        </>
+      )}
+    </DropdownShell>
+  );
+}
+
+/** Shared dropdown content so row actions stay in one place. */
+function DropdownShell({ children }: { children: React.ReactNode }) {
+  return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
         <Button variant="ghost" size="icon" className="h-8 w-8" aria-label="Actions">
@@ -145,57 +200,32 @@ function ActionMenu({
         </Button>
       </DropdownMenuTrigger>
       <DropdownMenuContent align="end" className="w-44">
-        {trashed ? (
-          <>
-            <DropdownMenuItem onClick={() => actions.onRestore(target)}>
-              <Undo2 className="h-4 w-4" /> Restore
-            </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => actions.onPurge(target)} className="text-destructive focus:text-destructive">
-              <XCircle className="h-4 w-4" /> Delete forever
-            </DropdownMenuItem>
-          </>
-        ) : (
-          <>
-            {target.type === "file" && previewable && (
-              <DropdownMenuItem onClick={() => actions.onPreview(target as unknown as FileRow)}>
-                <Eye className="h-4 w-4" /> Preview
-              </DropdownMenuItem>
-            )}
-            {target.type === "file" && (
-              <DropdownMenuItem onClick={() => actions.onDownload(target as unknown as FileRow)}>
-                <Download className="h-4 w-4" /> Download
-              </DropdownMenuItem>
-            )}
-            {target.type === "folder" && (
-              <DropdownMenuItem onClick={() => actions.onOpenFolder(target.id)}>
-                <FolderIcon className="h-4 w-4" /> Open
-              </DropdownMenuItem>
-            )}
-            {target.type === "file" && (
-              <DropdownMenuItem onClick={() => actions.onShare(target)}>
-                <Link2 className="h-4 w-4" /> Share
-              </DropdownMenuItem>
-            )}
-            <DropdownMenuItem onClick={() => actions.onRename(target)}>
-              <Pencil className="h-4 w-4" /> Rename
-            </DropdownMenuItem>
-            <DropdownMenuItem onClick={() => actions.onMove(target)}>
-              <FolderInput className="h-4 w-4" /> Move to…
-            </DropdownMenuItem>
-            {target.type === "file" && (
-              <DropdownMenuItem onClick={() => actions.onStar(target as unknown as FileRow)}>
-                <Star className={`h-4 w-4 ${starred ? "fill-amber-400 text-amber-400" : ""}`} />
-                {starred ? "Remove star" : "Star"}
-              </DropdownMenuItem>
-            )}
-            <DropdownMenuSeparator />
-            <DropdownMenuItem onClick={() => actions.onTrash(target)} className="text-destructive focus:text-destructive">
-              <Trash2 className="h-4 w-4" /> Move to trash
-            </DropdownMenuItem>
-          </>
-        )}
+        {children}
       </DropdownMenuContent>
     </DropdownMenu>
+  );
+}
+
+function MenuRow({
+  icon: Icon,
+  label,
+  onClick,
+  destructive,
+  starActive,
+}: {
+  icon: React.ComponentType<{ className?: string }>;
+  label: string;
+  onClick: () => void;
+  destructive?: boolean;
+  starActive?: boolean;
+}) {
+  return (
+    <DropdownMenuItem
+      onClick={onClick}
+      className={destructive ? "text-destructive focus:text-destructive" : ""}
+    >
+      <Icon className={`h-4 w-4 ${starActive ? "fill-amber-400 text-amber-400" : ""}`} /> {label}
+    </DropdownMenuItem>
   );
 }
 
@@ -282,6 +312,7 @@ function GridThumb({ file }: { file: FileRow }) {
           src={`/api/files/${file.id}/download?inline=1`}
           alt=""
           loading="lazy"
+          decoding="async"
           className="h-full w-full object-cover"
           onError={(e) => {
             const el = e.currentTarget;
@@ -303,7 +334,34 @@ function GridThumb({ file }: { file: FileRow }) {
   );
 }
 
-export function FileList({
+function SelectBox({
+  checked,
+  onChange,
+  label,
+  stopPropagation,
+}: {
+  checked: boolean;
+  onChange: (shift: boolean) => void;
+  label: string;
+  stopPropagation?: boolean;
+}) {
+  return (
+    <span
+      onClick={stopPropagation ? (e) => e.stopPropagation() : undefined}
+      className="shrink-0 grid place-items-center"
+    >
+      <Checkbox
+        checked={checked}
+        onClick={(e) => onChange((e as React.MouseEvent).shiftKey)}
+        onCheckedChange={() => {}}
+        aria-label={label}
+        className="h-4 w-4"
+      />
+    </span>
+  );
+}
+
+export const FileList = memo(function FileList({
   files,
   folders,
   loading,
@@ -311,6 +369,9 @@ export function FileList({
   actions,
   searchQuery,
   allFolders,
+  selection,
+  total,
+  onLoadMore,
 }: {
   files: FileRow[];
   folders: FolderRow[];
@@ -319,9 +380,25 @@ export function FileList({
   actions: Actions;
   searchQuery?: string;
   allFolders?: FolderRow[];
+  selection?: SelectionApi;
+  total?: number;
+  onLoadMore?: () => void;
 }) {
-  return <ListBody files={files} folders={folders} loading={loading} trashedView={trashedView} actions={actions} searchQuery={searchQuery} allFolders={allFolders} />;
-}
+  return (
+    <ListBody
+      files={files}
+      folders={folders}
+      loading={loading}
+      trashedView={trashedView}
+      actions={actions}
+      searchQuery={searchQuery}
+      allFolders={allFolders}
+      selection={selection}
+      total={total}
+      onLoadMore={onLoadMore}
+    />
+  );
+});
 
 function ListBody({
   files,
@@ -331,6 +408,9 @@ function ListBody({
   actions,
   searchQuery,
   allFolders,
+  selection,
+  total,
+  onLoadMore,
 }: {
   files: FileRow[];
   folders: FolderRow[];
@@ -339,20 +419,39 @@ function ListBody({
   actions: Actions;
   searchQuery?: string;
   allFolders?: FolderRow[];
+  selection?: SelectionApi;
+  total?: number;
+  onLoadMore?: () => void;
 }) {
   // Sort + view preferences live in the persisted drive store.
   const sort = useDrive((s) => s.sort);
   const grid = useDrive((s) => s.viewMode) === "grid";
   const setSort = useDrive((s) => s.setSort);
 
+  const lastClicked = useRef<{ type: "file" | "folder"; index: number } | null>(null);
+
   const sortedFolders = useMemo(() => sortRows(folders, sort), [folders, sort]);
   const sortedFiles = useMemo(() => sortRows(files, sort), [files, sort]);
+  const orderedFileIds = useMemo(() => sortedFiles.map((f) => f.id), [sortedFiles]);
+  const orderedFolderIds = useMemo(() => sortedFolders.map((f) => f.id), [sortedFolders]);
   const folderHits = useMemo(() => {
     if (!searchQuery || !allFolders) return [];
     const q = searchQuery.trim().toLowerCase();
     if (!q) return [];
-    return allFolders.filter((f) => f.name.toLowerCase().includes(q)).slice(0, 12);
+    return allFolders.filter((f) => !f.trashedAt && f.name.toLowerCase().includes(q)).slice(0, 12);
   }, [searchQuery, allFolders]);
+
+  function toggleSelect(type: "file" | "folder", id: string, shift?: boolean) {
+    if (!selection) return;
+    const orderedIds = type === "file" ? orderedFileIds : orderedFolderIds;
+    const rangeable = Boolean(shift && orderedIds && lastClicked.current?.type === type);
+    selection.toggle(type, id, rangeable ? { shift: true, orderedIds } : undefined);
+    lastClicked.current = { type, index: orderedIds.indexOf(id) };
+  }
+
+  const hasSelection = selection && selection.count > 0;
+  const allFilesSelected = selection && sortedFiles.length > 0 && sortedFiles.every((f) => selection.files.has(f.id));
+  const someFilesSelected = selection && sortedFiles.some((f) => selection.files.has(f.id));
 
   if (loading) {
     return (
@@ -374,7 +473,7 @@ function ListBody({
           {searchQuery
             ? `No matches for “${searchQuery}”. Try a different search.`
             : trashedView
-              ? "Items you move to trash will appear here."
+              ? "Items you move to trash will appear here. They stay recoverable until you delete them forever."
               : "Drop files anywhere or use the Upload button to get started."}
         </p>
       </div>
@@ -382,12 +481,32 @@ function ListBody({
   }
 
   const SortIcon = SORT_ICONS[sort] ?? ArrowDownAZ;
+  const moreAvailable = typeof total === "number" && files.length < total;
   const header = (
     <div className="flex items-center justify-between gap-2 px-1 pb-2 flex-wrap">
       <p className="text-xs text-muted-foreground">
-        {folders.length} folder{folders.length === 1 ? "" : "s"} · {files.length} file{files.length === 1 ? "" : "s"}
+        {folders.length} folder{folders.length === 1 ? "" : "s"} · {files.length}
+        {typeof total === "number" && total > files.length ? ` of ${total}` : ""} file
+        {files.length === 1 ? "" : "s"}
       </p>
       <div className="flex items-center gap-1.5">
+        {selection && (
+          <label className="flex items-center gap-2 mr-1 cursor-pointer">
+            <Checkbox
+              checked={allFilesSelected ? true : someFilesSelected ? "indeterminate" : false}
+              onCheckedChange={() => {
+                if (allFilesSelected) {
+                  selection.selectAll([], []);
+                } else {
+                  selection.selectAll(orderedFileIds, orderedFolderIds);
+                }
+              }}
+              aria-label="Select all"
+              className="h-4 w-4"
+            />
+            <span className="text-xs text-muted-foreground select-none">All</span>
+          </label>
+        )}
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
             <Button variant="ghost" size="sm" className="h-7 gap-1.5 rounded-full px-2.5 text-xs text-muted-foreground">
@@ -417,6 +536,15 @@ function ListBody({
       </div>
     </div>
   );
+
+  const loadMoreButton = moreAvailable ? (
+    <div className="flex justify-center pt-4 pb-2">
+      <Button variant="outline" size="sm" className="rounded-full gap-2" onClick={() => onLoadMore?.()}>
+        <ChevronsDown className="h-4 w-4" />
+        Show more ({files.length} of {total})
+      </Button>
+    </div>
+  ) : null;
 
   const folderHitsBlock =
     searchQuery && folderHits.length > 0 ? (
@@ -462,13 +590,32 @@ function ListBody({
         <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 xl:grid-cols-6 gap-3">
           {sortedFolders.map((f) => (
             <ContextShell key={f.id} target={{ type: "folder", id: f.id, name: f.name }} trashed={trashedView} actions={actions}>
-              <button
-                onClick={() => !trashedView && actions.onOpenFolder(f.id)}
-                className="w-full rounded-2xl border bg-card p-4 flex flex-col items-center gap-2 hover:shadow-md hover:border-primary/40 hover:-translate-y-0.5 transition-all text-center animate-fade-up"
+              <div
+                role="button"
+                tabIndex={0}
+                onClick={(e) => {
+                  if (hasSelection || e.metaKey || e.ctrlKey) {
+                    toggleSelect("folder", f.id);
+                    return;
+                  }
+                  if (!trashedView) actions.onOpenFolder(f.id);
+                }}
+                onKeyDown={(e) => e.key === "Enter" && !trashedView && actions.onOpenFolder(f.id)}
+                className={`relative w-full rounded-2xl border bg-card ${selection ? "pt-7" : ""} p-4 flex flex-col items-center gap-2 cursor-pointer hover:shadow-md hover:border-primary/40 hover:-translate-y-0.5 transition-all text-center animate-fade-up ${
+                  selection?.folders.has(f.id) ? "border-primary ring-1 ring-primary/40 bg-accent/40" : ""
+                }`}
               >
+                {selection && (
+                  <span className="absolute left-2 top-2">
+                    <SelectBox checked={selection.folders.has(f.id)} onChange={(shift) => toggleSelect("folder", f.id, shift)} label={`Select ${f.name}`} />
+                  </span>
+                )}
                 <FolderIcon className="h-12 w-12 icon-folder" />
                 <span className="text-sm truncate w-full">{f.name}</span>
-              </button>
+                {trashedView && f.trashedAt && (
+                  <span className="text-[11px] text-muted-foreground">trashed {formatDate(f.trashedAt)}</span>
+                )}
+              </div>
             </ContextShell>
           ))}
           {sortedFiles.map((file) => (
@@ -483,10 +630,23 @@ function ListBody({
               <div
                 role="button"
                 tabIndex={0}
-                onClick={() => actions.onPreview(file)}
-                onKeyDown={(e) => e.key === "Enter" && actions.onPreview(file)}
-                className="w-full rounded-2xl border bg-card p-3 flex flex-col items-center gap-2 cursor-pointer hover:shadow-md hover:border-primary/40 hover:-translate-y-0.5 transition-all text-center animate-fade-up"
+                onClick={(e) => {
+                  if (hasSelection || e.metaKey || e.ctrlKey) {
+                    toggleSelect("file", file.id);
+                    return;
+                  }
+                  actions.onPreview(file);
+                }}
+                onKeyDown={(e) => e.key === "Enter" && !trashedView && actions.onPreview(file)}
+                className={`relative w-full rounded-2xl border bg-card ${selection ? "pt-7" : ""} p-3 flex flex-col items-center gap-2 cursor-pointer hover:shadow-md hover:border-primary/40 hover:-translate-y-0.5 transition-all text-center animate-fade-up ${
+                  selection?.files.has(file.id) ? "border-primary ring-1 ring-primary/40 bg-accent/40" : ""
+                }`}
               >
+                {selection && (
+                  <span className="absolute left-2 top-2">
+                    <SelectBox checked={selection.files.has(file.id)} onChange={(shift) => toggleSelect("file", file.id, shift)} label={`Select ${file.name}`} />
+                  </span>
+                )}
                 <GridThumb file={file} />
                 <span className="text-sm truncate w-full flex items-center justify-center gap-1">
                   <span className="truncate">{file.name}</span>
@@ -497,6 +657,7 @@ function ListBody({
             </ContextShell>
           ))}
         </div>
+        {loadMoreButton}
       </div>
     );
   }
@@ -509,6 +670,7 @@ function ListBody({
         <table className="w-full text-sm">
           <thead>
             <tr className="text-left text-xs text-muted-foreground border-b bg-muted/40">
+              {selection && <th className="pl-3 pr-1 py-2.5 w-10"><span className="sr-only">Select</span></th>}
               <th className="px-4 py-2.5 font-medium">Name</th>
               <th className="px-4 py-2.5 font-medium hidden sm:table-cell">Size</th>
               <th className="px-4 py-2.5 font-medium hidden md:table-cell">{trashedView ? "Trashed" : "Modified"}</th>
@@ -521,9 +683,20 @@ function ListBody({
               return (
                 <ContextShell key={f.id} target={target} trashed={trashedView} actions={actions}>
                   <tr
-                    className="border-b last:border-0 hover:bg-muted/50 cursor-pointer"
-                    onClick={() => !trashedView && actions.onOpenFolder(f.id)}
+                    className={`border-b last:border-0 hover:bg-muted/50 cursor-pointer ${selection?.folders.has(f.id) ? "bg-accent/40" : ""}`}
+                    onClick={(e) => {
+                      if (hasSelection || e.metaKey || e.ctrlKey) {
+                        toggleSelect("folder", f.id, e.shiftKey);
+                        return;
+                      }
+                      if (!trashedView) actions.onOpenFolder(f.id);
+                    }}
                   >
+                    {selection && (
+                      <td className="pl-3 pr-1 py-2.5" onClick={(e) => e.stopPropagation()}>
+                        <SelectBox checked={selection.folders.has(f.id)} onChange={(shift) => toggleSelect("folder", f.id, shift)} label={`Select ${f.name}`} />
+                      </td>
+                    )}
                     <td className="px-4 py-2.5">
                       <span className="flex items-center gap-3 min-w-0">
                         <FolderIcon className="h-5 w-5 shrink-0 icon-folder" />
@@ -545,9 +718,20 @@ function ListBody({
               return (
                 <ContextShell key={file.id} target={target} trashed={trashedView} starred={file.starred} actions={actions} previewable>
                   <tr
-                    className="border-b last:border-0 hover:bg-muted/50 cursor-pointer"
-                    onClick={() => actions.onPreview(file)}
+                    className={`border-b last:border-0 hover:bg-muted/50 cursor-pointer ${selection?.files.has(file.id) ? "bg-accent/40" : ""}`}
+                    onClick={(e) => {
+                      if (hasSelection || e.metaKey || e.ctrlKey) {
+                        toggleSelect("file", file.id, e.shiftKey);
+                        return;
+                      }
+                      actions.onPreview(file);
+                    }}
                   >
+                    {selection && (
+                      <td className="pl-3 pr-1 py-2.5" onClick={(e) => e.stopPropagation()}>
+                        <SelectBox checked={selection.files.has(file.id)} onChange={(shift) => toggleSelect("file", file.id, shift)} label={`Select ${file.name}`} />
+                      </td>
+                    )}
                     <td className="px-4 py-2.5">
                       <span className="flex items-center gap-3 min-w-0">
                         <Icon className="h-5 w-5 shrink-0 icon-file" />
@@ -569,6 +753,7 @@ function ListBody({
           </tbody>
         </table>
       </div>
+      {loadMoreButton}
     </div>
   );
 }

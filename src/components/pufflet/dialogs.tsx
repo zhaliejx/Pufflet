@@ -13,6 +13,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { FolderRow } from "./store";
+import { formatDate } from "@/lib/format";
 import { toast } from "sonner";
 import { AlertTriangle, Check, Copy, FolderTree, Link2, Loader2, Plus, Trash2 } from "lucide-react";
 
@@ -34,7 +35,9 @@ export interface ShareLinkView {
 
 /**
  * Public share links for one file. Anyone with a link can download the file
- * WITHOUT logging in; links can be revoked at any time.
+ * WITHOUT logging in; links support optional expiry dates and can be revoked
+ * at any time. (The architecture is capability-token based: possession of the
+ * link IS the permission — there are no per-user ACLs to configure.)
  */
 export function ShareDialog({
   target,
@@ -46,10 +49,20 @@ export function ShareDialog({
   const [links, setLinks] = useState<ShareLinkView[] | null>(null);
   const [busy, setBusy] = useState(false);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [expiry, setExpiry] = useState<string>("never");
+
+  const EXPIRY_CHOICES: { value: string; label: string; days: number | null }[] = [
+    { value: "never", label: "No expiry", days: null },
+    { value: "1d", label: "1 day", days: 1 },
+    { value: "7d", label: "7 days", days: 7 },
+    { value: "30d", label: "30 days", days: 30 },
+    { value: "90d", label: "90 days", days: 90 },
+  ];
 
   useEffect(() => {
     if (!target) return;
     setLinks(null);
+    setExpiry("never");
     fetch(`/api/files/${target.id}/share`)
       .then(async (res) => {
         const body = await res.json().catch(() => null);
@@ -68,16 +81,19 @@ export function ShareDialog({
     if (!target) return;
     setBusy(true);
     try {
+      const days = EXPIRY_CHOICES.find((e) => e.value === expiry)?.days ?? null;
       const res = await fetch(`/api/files/${target.id}/share`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({}),
+        body: JSON.stringify(days ? { expiresInDays: days } : {}),
       });
       const body = await res.json().catch(() => null);
       if (!res.ok) throw new Error(body?.error?.message ?? "Could not create share link");
       setLinks((prev) => [body.link, ...(prev ?? [])]);
       void copyLink(body.link);
-      toast.success("Public link created — URL copied");
+      toast.success(
+        days ? `Public link created — expires in ${days} day${days === 1 ? "" : "s"} (URL copied)` : "Public link created — URL copied",
+      );
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Could not create share link");
     } finally {
@@ -132,29 +148,68 @@ export function ShareDialog({
           {links !== null && active.length === 0 && (
             <p className="text-sm text-muted-foreground py-2">No active links yet.</p>
           )}
-          {active.map((link) => (
-            <div key={link.id} className="rounded-xl border bg-muted/40 px-3 py-2 flex items-center gap-2">
-              <Link2 className="h-4 w-4 shrink-0 text-muted-foreground" />
-              <span className="text-sm truncate flex-1" title={`${window.location.origin}${link.urlPath}`}>
-                {link.urlPath}
-              </span>
-              <span className="text-[11px] text-muted-foreground shrink-0">
-                {link.downloads} download{link.downloads === 1 ? "" : "s"}
-              </span>
-              <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => copyLink(link)} aria-label="Copy link">
-                {copiedId === link.id ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
-              </Button>
-              <Button
-                variant="ghost"
-                size="icon"
-                className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                onClick={() => revoke(link)}
-                aria-label="Revoke link"
+          {active.map((link) => {
+            const expired = link.expiresAt && new Date(link.expiresAt) <= new Date();
+            return (
+              <div key={link.id} className="rounded-xl border bg-muted/40 px-3 py-2 space-y-1.5">
+                <div className="flex items-center gap-2">
+                  <Link2 className="h-4 w-4 shrink-0 text-muted-foreground" />
+                  <span className="text-sm truncate flex-1" title={`${window.location.origin}${link.urlPath}`}>
+                    {link.urlPath}
+                  </span>
+                  <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => copyLink(link)} aria-label="Copy link">
+                    {copiedId === link.id ? <Check className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                    onClick={() => revoke(link)}
+                    aria-label="Revoke link"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+                <p className="text-[11px] text-muted-foreground flex items-center gap-1.5 flex-wrap">
+                  <span>
+                    {link.downloads} download{link.downloads === 1 ? "" : "s"}
+                  </span>
+                  <span>·</span>
+                  <span>created {formatDate(link.createdAt)}</span>
+                  {link.expiresAt && (
+                    <>
+                      <span>·</span>
+                      <span className={expired ? "text-destructive font-medium" : ""}>
+                        {expired ? "expired" : `expires ${formatDate(link.expiresAt)}`}
+                      </span>
+                    </>
+                  )}
+                </p>
+              </div>
+            );
+          })}
+        </div>
+
+        <div className="flex items-center gap-3 rounded-xl border bg-muted/30 px-3 py-2.5">
+          <Label htmlFor="share-expiry" className="text-sm text-muted-foreground shrink-0">
+            Expires
+          </Label>
+          <div className="flex-1 flex flex-wrap gap-1">
+            {EXPIRY_CHOICES.map((choice) => (
+              <button
+                key={choice.value}
+                type="button"
+                onClick={() => setExpiry(choice.value)}
+                className={`rounded-full px-2.5 py-1 text-xs border transition-colors ${
+                  expiry === choice.value
+                    ? "bg-primary text-primary-foreground border-primary"
+                    : "bg-background hover:bg-muted"
+                }`}
               >
-                <Trash2 className="h-3.5 w-3.5" />
-              </Button>
-            </div>
-          ))}
+                {choice.label}
+              </button>
+            ))}
+          </div>
         </div>
 
         <DialogFooter>

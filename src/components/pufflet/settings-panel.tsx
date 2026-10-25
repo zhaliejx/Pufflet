@@ -19,8 +19,10 @@ import {
   CloudOff,
   Copy,
   DatabaseBackup,
+  ExternalLink,
   History,
   KeyRound,
+  Link2,
   Palette,
   Plus,
   Server,
@@ -99,6 +101,17 @@ interface BackupHistory {
   pinned: { found: boolean; messageId?: string; fileName?: string; fileSize?: number };
   checkpoints: { messageId: string; fileId: string; at: string; size: number; files: number; users: number }[];
   hotMessageKnown: boolean;
+}
+
+interface ShareRow {
+  id: string;
+  urlPath: string;
+  createdAt: string;
+  expiresAt: string | null;
+  expired: boolean;
+  downloads: number;
+  lastDownloadAt: string | null;
+  file: { id: string; name: string; size: number; mimeType: string; trashedAt: string | null };
 }
 
 interface Props {
@@ -559,6 +572,9 @@ export function SettingsPanel({ user }: Props) {
         </CardContent>
       </Card>
 
+      {/* Sharing overview — every active public link in one place */}
+      <SharingCard />
+
       {/* Create key dialog */}
       <Dialog open={createOpen} onOpenChange={(v) => !v && setCreateOpen(false)}>
         <DialogContent className="max-w-sm rounded-2xl">
@@ -689,6 +705,120 @@ export function SettingsPanel({ user }: Props) {
         </AlertDialogContent>
       </AlertDialog>
     </div>
+  );
+}
+
+/** Sharing overview: every active public link across ALL files, with one-click
+ *  copy/revoke. The owner-only counterpart of the per-file Share dialog — this
+ *  is where "which of my files are shared?" gets answered. */
+function SharingCard() {
+  const [links, setLinks] = useState<ShareRow[] | null>(null);
+  const [copiedId, setCopiedId] = useState<string | null>(null);
+
+  const loadLinks = useCallback(() => {
+    apiCall<{ links: ShareRow[] }>("/api/shares")
+      .then((res) => setLinks(res.links))
+      .catch(() => setLinks([]));
+  }, []);
+
+  useEffect(() => {
+    loadLinks();
+  }, [loadLinks]);
+
+  async function copy(row: ShareRow) {
+    const url = `${window.location.origin}${row.urlPath}`;
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopiedId(row.id);
+      setTimeout(() => setCopiedId(null), 1500);
+    } catch {
+      toast.info(url);
+    }
+  }
+
+  async function revoke(row: ShareRow) {
+    try {
+      await apiCall(`/api/files/${row.file.id}/share?linkId=${encodeURIComponent(row.id)}`, {
+        method: "DELETE",
+      });
+      toast.success(`Link for “${row.file.name}” revoked`);
+      await loadLinks();
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Revoke failed");
+    }
+  }
+
+  return (
+    <Card className="rounded-2xl">
+      <CardHeader>
+        <CardTitle className="font-brand text-brand-heading flex items-center gap-2">
+          <Link2 className="h-5 w-5" /> Sharing
+        </CardTitle>
+        <CardDescription>
+          Every active public link across your files. Anyone with a link can download that file
+          without an account — revoke access here at any time.
+        </CardDescription>
+      </CardHeader>
+      <CardContent>
+        {links === null ? (
+          <p className="text-sm text-muted-foreground py-4 text-center">Loading…</p>
+        ) : links.length === 0 ? (
+          <p className="text-sm text-muted-foreground py-4 text-center">
+            Nothing is shared right now. Use the Share action on any file to create a link.
+          </p>
+        ) : (
+          <div className="space-y-2">
+            {links.map((row) => (
+              <div key={row.id} className="rounded-xl border px-4 py-3 space-y-1.5">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="font-medium truncate text-sm">
+                    {row.file.name}
+                    {row.file.trashedAt && (
+                      <Badge variant="secondary" className="ml-2">
+                        file in trash
+                      </Badge>
+                    )}
+                    {row.expired && (
+                      <Badge variant="destructive" className="ml-2">
+                        expired
+                      </Badge>
+                    )}
+                  </p>
+                  <span className="flex items-center gap-1 shrink-0">
+                    <Button variant="ghost" size="icon" className="h-7 w-7" onClick={() => copy(row)} aria-label="Copy link">
+                      {copiedId === row.id ? <BadgeCheck className="h-3.5 w-3.5 text-emerald-500" /> : <Copy className="h-3.5 w-3.5" />}
+                    </Button>
+                    <a
+                      href={row.urlPath}
+                      target="_blank"
+                      rel="noreferrer"
+                      className="inline-grid place-items-center h-7 w-7 rounded-md hover:bg-muted text-muted-foreground hover:text-foreground"
+                      aria-label="Open public page"
+                    >
+                      <ExternalLink className="h-3.5 w-3.5" />
+                    </a>
+                    <Button
+                      variant="ghost"
+                      size="icon"
+                      className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                      onClick={() => revoke(row)}
+                      aria-label="Revoke link"
+                    >
+                      <Trash2 className="h-3.5 w-3.5" />
+                    </Button>
+                  </span>
+                </div>
+                <p className="text-[11px] text-muted-foreground font-mono truncate">{row.urlPath}</p>
+                <p className="text-[11px] text-muted-foreground">
+                  {row.downloads} download{row.downloads === 1 ? "" : "s"} · created {formatDate(row.createdAt)}
+                  {row.expiresAt ? ` · ${row.expired ? "expired" : "expires"} ${formatDate(row.expiresAt)}` : " · no expiry"}
+                </p>
+              </div>
+            ))}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 
