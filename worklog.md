@@ -231,3 +231,21 @@ Stage Summary:
 - Downloads now work in EVERY embedded/local-server deployment: local mode reads getFile's absolute disk path (server cloud-re-downloads missing files), hosted keeps the HTTP route, and stale references self-heal via re-send-by-file_id with id persistence + channel cleanup — this also un-breaks the pinned-snapshot restore, so ephemeral-host self-healing works again
 - Share links ship end-to-end: UI dialog, session+v1 management APIs, public page/meta/download with rate limiting and revocation, snapshot persistence (v3)
 - User action: redeploy; existing /s links survive self-heal; note docker-compose users get the shared volume automatically, external-bot-api hosts must mount the bot-api work dir at the same path for >20MB downloads
+
+---
+Task ID: 21
+Agent: main (Z.ai)
+Task: External PostgreSQL support (Render: stop the per-redeploy index resets) + push the backlog
+
+Work Log:
+- Clarified scope with the user's follow-up: persistence complaints = Render ephemeral disk wiping SQLite; they want an external DB wired in. Discovered Task 20's download-fix + share work was already committed (861d8f5) but NOT pushed — origin/main was 15 commits behind, which is why their Render still showed TG_DOWNLOAD 404
+- docker/entrypoint.sh: DATABASE_URL provider auto-detection (postgres://|postgresql:// -> postgresql path). Postgres boot = prisma generate --schema prisma/schema.postgres.prisma (regenerates the baked sqlite client in-place; verified 133ms, same musl query engine reused, no download) + prisma db push with 6x10s provisioning retry; --accept-data-loss deliberately NOT set for postgres (durable source of truth — destructive changes abort boot with a clear message; PUFFLET_DB_ACCEPT_DATA_LOSS=1 escape hatch); sqlite path byte-identical to before
+- /api/health: databaseProvider field (sqlite|postgresql|unknown) derived from DATABASE_URL scheme — instant post-deploy verification without touching the DB
+- Verified app code is provider-portable: only raw SQL in src/ is SELECT 1; no @db native types, no PRAGMA, schemas are byte-twins except the provider line
+- README Option B2: new "External database on Render — stop the per-redeploy resets" section (Render Postgres same-region internal string vs external +sslmode=require, Neon/Supabase/Railway work too; boot behavior; first-boot seeding OR auto-restore from a pinned v3 snapshot incl. vault key + share links; honest note that rows only ever in the wiped SQLite file are gone; STATE_BACKUP on = rolling off-site backup, off = DB-only). .env.example comment updated (auto-detect + bare-Node hint)
+- Validation: sh -n OK; prisma validate (postgres schema) OK; generate round-trip postgresql<->sqlite OK (local client restored); unit 61/61; lint clean; production build EXIT=0 (first attempt hit a transient sandbox font-fetch error on Baloo_2, rerun clean) + standalone assembled
+- Pushed origin/main (16 commits incl. the Task 20 backlog — user's Render was deploying pre-Task-20 code)
+
+Stage Summary:
+- Set DATABASE_URL to any postgres:// connection string (Render Internal URL or external with ?sslmode=require) and the index — users, password, folders, files, API keys, share links — persists across redeploys/sleeps; /api/health shows databaseProvider; empty external DB + pinned snapshot = automatic migration restore on first boot; file bytes were always durable in the storage chat
+- User action: Render -> New PostgreSQL (same region) -> add DATABASE_URL to the web service -> redeploy; keep STATE_BACKUP on as the off-site index backup

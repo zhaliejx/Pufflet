@@ -379,6 +379,56 @@ Notes:
 - Paid instances can attach a **Disk** mounted at `/app/db` to persist the
   SQLite database across deploys.
 
+#### External database on Render — stop the per-redeploy resets (recommended)
+
+Render's free disk is wiped on every deploy/sleep, which resets the SQLite
+index: your password, folder structure and share links vanish and files in the
+channel become unindexed. Point Pufflet at an **external PostgreSQL** and the
+whole index becomes durable — redeploys just reconnect to it.
+
+1. **Create the database** — Render Dashboard → *New* → *PostgreSQL* (pick the
+   **same region** as the web service; the internal connection string is
+   faster and free of egress). Any managed Postgres works too: Neon,
+   Supabase, Railway, a VPS `postgres` — the image auto-detects it.
+2. **Wire it up** — in the web service's *Environment*, add:
+
+   ```
+   DATABASE_URL = <your Postgres connection string>
+   ```
+
+   - Same-region Render database: use the **Internal Database URL**
+     (`postgres://user:pass@dpg-xxx/dbname`) — no extra params needed.
+   - Anything reached over the public internet (Render **External Database
+     URL**, Neon, Supabase, ...): append `?sslmode=require` — most providers
+     hand you the string pre-built; keep it.
+   - Leave `DATABASE_URL` unset to stay on SQLite (file-based, inside the
+     container).
+
+3. **Deploy.** On boot the entrypoint sees the `postgres://` scheme,
+   regenerates the Prisma client for PostgreSQL, and pushes the schema
+   (retries for ~1 min while a freshly created database is still
+   provisioning; `GET /api/health` shows `databaseProvider` afterwards).
+   Then it seeds the default account — or, better:
+
+4. **Data on first boot.** If a pinned state snapshot already exists in your
+   storage chat (Settings → Data safety shows when the last one was taken),
+   the empty external DB is auto-restored from it — users, password, files,
+   API keys and share links all come back and Telegram messages keep working.
+   Note the index rows that only ever lived in the wiped SQLite file are
+   gone for good — those channel messages were already orphaned by previous
+   redeploys.
+
+Two ways to run it from here:
+
+- **STATE_BACKUP stays on (default, recommended).** The pinned snapshot in
+  your storage chat becomes a rolling off-site backup of the index: even a
+  lost/deleted database can be re-created from it on the next boot.
+- **`STATE_BACKUP="false"`** to rely on the external DB alone (fewer
+  Telegram calls; how the Vercel guide runs).
+
+File **bytes** always live in your Telegram storage chat either way — the
+database is only the index.
+
 ### Option C — Any Docker host (VPS, home server, Railway)
 
 ```bash

@@ -10,8 +10,57 @@ set -e
 export DATABASE_URL
 mkdir -p /app/db
 
-echo "[pufflet] syncing database schema (prisma db push)..."
-node node_modules/prisma/build/index.js db push --skip-generate --accept-data-loss
+# --- Database provider auto-detection ----------------------------------------
+# The image ships with the Prisma client generated for SQLite (the default).
+# When DATABASE_URL points at an external PostgreSQL (Render Postgres, Neon,
+# Supabase, ...), the client is REGENERATED for the postgresql provider at
+# boot and the schema is pushed to that database — the index (users,
+# passwords, files, share links) then survives every redeploy. SQLite keeps
+# the previous single-command path.
+db_provider="sqlite"
+case "${DATABASE_URL}" in
+  postgres://* | postgresql://*) db_provider="postgresql" ;;
+esac
+
+if [ "$db_provider" = "postgresql" ]; then
+  echo "[pufflet] DATABASE_URL is PostgreSQL — regenerating the Prisma client for the postgresql provider..."
+  node node_modules/prisma/build/index.js generate --schema prisma/schema.postgres.prisma
+
+  echo "[pufflet] syncing schema to PostgreSQL (prisma db push)..."
+  # A freshly created managed database (Render/Neon/Supabase) can still be
+  # provisioning while the app service boots — retry instead of crash-looping.
+  # --accept-data-loss is deliberately NOT set here: the external database is
+  # the durable source of truth, so a destructive schema change aborts boot
+  # with a clear Prisma message instead of silently dropping data. Set
+  # PUFFLET_DB_ACCEPT_DATA_LOSS=1 to override explicitly.
+  data_loss_flag=""
+  if [ "${PUFFLET_DB_ACCEPT_DATA_LOSS}" = "1" ]; then
+    data_loss_flag="--accept-data-loss"
+  fi
+  db_push_ok=0
+  attempt=0
+  while [ "$attempt" -lt 6 ]; do
+    attempt=$((attempt + 1))
+    if node node_modules/prisma/build/index.js db push --schema prisma/schema.postgres.prisma --skip-generate $data_loss_flag; then
+      db_push_ok=1
+      break
+    fi
+    if [ "$attempt" -lt 6 ]; then
+      echo "[pufflet] db push failed (attempt ${attempt}/6) — the database may still be provisioning; retrying in 10s..."
+      sleep 10
+    fi
+  done
+  if [ "$db_push_ok" != "1" ]; then
+    echo "[pufflet] ERROR: could not sync the schema to PostgreSQL after 6 attempts." >&2
+    echo "[pufflet] Check DATABASE_URL (host/port/user/password/dbname; add ?sslmode=require for external endpoints)" >&2
+    echo "[pufflet] and that the database is running. SQLite mode is used when DATABASE_URL starts with 'file:'." >&2
+    exit 1
+  fi
+  echo "[pufflet] using external PostgreSQL — the index now persists across redeploys."
+else
+  echo "[pufflet] syncing database schema (prisma db push, sqlite)..."
+  node node_modules/prisma/build/index.js db push --skip-generate --accept-data-loss
+fi
 
 if [ -n "${TELEGRAM_API_ID}" ] && [ -n "${TELEGRAM_API_HASH}" ]; then
   # Pre-flight validation — telegram-bot-api exits immediately (usage dump /
