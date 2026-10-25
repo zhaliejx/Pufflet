@@ -320,12 +320,22 @@ index on every wake-up.
      allows. Do **not** set `TELEGRAM_API_ID`/`TELEGRAM_API_HASH` in this
      mode — the embedded server stays off.
    - Want the embedded 2000 MB mode instead? Add `TELEGRAM_API_ID` +
-     `TELEGRAM_API_HASH` (from my.telegram.org) and **don't** set
-     `TELEGRAM_API_BASE` — the entrypoint spawns the Local Bot API on :8081
-     and raises both limits to 2000 MB. `TELEGRAM_API_ID` must be the plain
-     numeric id (no quotes/spaces, not the hash) — the bot-api server refuses
-     to start otherwise. Requires the one-time `npm run
-     tg:logout` migration (see Option B, step 2).
+     `TELEGRAM_API_HASH` and **don't** set `TELEGRAM_API_BASE` — the
+     entrypoint spawns the Local Bot API on :8081 and raises both limits to
+     2000 MB. Where the values come from: log in at
+     <https://my.telegram.org> → *API development tools* (with your **phone
+     number**, not the bot) → `api_id` is a small number like `1234567` and
+     `api_hash` is a 32-character hex string. **The number at the start of
+     your bot token is NOT the api_id** — it's the bot id, and the Bot API
+     server refuses to start on it (the entrypoint catches this and says so).
+     Values must be pasted plain: no quotes, no spaces.
+   - Embedded mode also needs the **one-time hosted logOut** before the bot
+     can log in to your local server: open
+     `https://api.telegram.org/bot<TOKEN>/logOut` in a browser (expect
+     `{"ok":true,"result":true}`) or run `npm run tg:logout` locally (see
+     Option B, step 2). Do this *before/while* deploying — it can take up to
+     10 minutes to take effect, and until then Telegram calls fail with a
+     conflict/unauthorized error.
    - `DATABASE_URL` — leave unset (SQLite at `/app/db/pufflet.db`).
 3. **Deploy** → first build ~5–10 min → open the URL → sign in
    `pufflet@pufflet.com` / `pufflet` → change the password in Settings.
