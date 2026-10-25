@@ -1,5 +1,6 @@
 import { getSessionUser } from "@/lib/auth";
 import { flushStateBackup, backupStatus } from "@/lib/state-backup";
+import { audit } from "@/lib/audit";
 import { jsonError, jsonOk, unauthorized } from "@/lib/api-utils";
 import { clientIp, rateLimit } from "@/lib/ratelimit";
 
@@ -14,5 +15,6 @@ export async function POST(req: Request) {
 
   const res = await flushStateBackup();
   if (!res.ok) return jsonError(res.error ?? "Backup failed", 502);
-  return jsonOk({ ok: true, bytes: res.bytes, lastBackupAt: backupStatus().lastBackupAt });
+  audit("backup.flush", user.id, "pinned", `${res.bytes ?? 0} bytes${res.checkpointTaken ? ", checkpoint taken" : ""}`);
+  return jsonOk({ ok: true, bytes: res.bytes, checkpointTaken: res.checkpointTaken ?? false, lastBackupAt: backupStatus().lastBackupAt });
 }

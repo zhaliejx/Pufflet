@@ -30,6 +30,83 @@ export const LEGACY_SNAPSHOT_VERSIONS = [1, 2] as const; // still restorable (pr
 export const STATE_BACKUP_MARKER = "pufflet-state-backup.json";
 const MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024; // safety cap while restoring
 
+// --- checkpoint history (previous good backups) ------------------------------
+// The pinned message is the HOT slot: edited in place on every flush. Every
+// CHECKPOINT_INTERVAL_MS a fresh message is additionally sent as a COLD
+// checkpoint, so the previous good snapshot survives a bad hot edit. Checkpoint
+// message ids (+ file ids) are recorded in the Setting table — they are only
+// discoverable while the DB lives, which is exactly the failure mode they
+// cover (bad/corrupt hot snapshot with an intact database).
+export const CHECKPOINT_INTERVAL_MS = 12 * 60 * 60 * 1000; // 12 hours
+export const MAX_CHECKPOINTS = 3;
+export const CHECKPOINTS_SETTING_KEY = "stateBackup.checkpoints";
+export const HOT_MESSAGE_SETTING_KEY = "stateBackup.messageId";
+
+export interface CheckpointEntry {
+  messageId: string;
+  fileId: string;
+  at: string; // ISO timestamp of when the checkpoint was taken
+  size: number;
+  files: number;
+  users: number;
+}
+
+/** Safely parse the stored checkpoint ring; garbage in -> empty list out. */
+export function parseCheckpoints(raw: string | null | undefined): CheckpointEntry[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter(
+      (c): c is CheckpointEntry =>
+        !!c &&
+        typeof c === "object" &&
+        typeof (c as CheckpointEntry).messageId === "string" &&
+        typeof (c as CheckpointEntry).fileId === "string" &&
+        typeof (c as CheckpointEntry).at === "string",
+    );
+  } catch {
+    return [];
+  }
+}
+
+/** Insert a checkpoint (newest first), dedupe by messageId, trim the ring. */
+export function pushCheckpoint(
+  list: CheckpointEntry[],
+  entry: CheckpointEntry,
+  max: number = MAX_CHECKPOINTS,
+): CheckpointEntry[] {
+  const next = [entry, ...list.filter((c) => c.messageId !== entry.messageId)];
+  return next.slice(0, Math.max(1, max));
+}
+
+/** True when a fresh cold checkpoint is due (none yet, or the newest expired). */
+export function shouldCheckpoint(
+  list: CheckpointEntry[],
+  now: number = Date.now(),
+  intervalMs: number = CHECKPOINT_INTERVAL_MS,
+): boolean {
+  if (list.length === 0) return true;
+  const newest = list.reduce((acc, c) => Math.max(acc, new Date(c.at).getTime() || 0), 0);
+  return now - newest >= intervalMs;
+}
+
+/** Refuse to overwrite a good backup with an empty index (a wiped/failed DB
+ *  must never destroy the only copy of the index in the storage chat). */
+export function shouldRefuseEmptySnapshot(users: number, hasPreviousGood: boolean): boolean {
+  return users === 0 && hasPreviousGood;
+}
+
+/** Serialize, then re-parse and re-serialize to prove the snapshot survives a
+ *  round-trip — a corrupt build must never replace the pinned good copy. */
+export function serializeVerifiedSnapshot(data: SnapshotData): string {
+  const text = JSON.stringify(data);
+  const reparsed = parseSnapshot(text); // throws on structural problems
+  const again = JSON.stringify(reparsed);
+  parseSnapshot(again); // and once more for good measure
+  return text;
+}
+
 // --------------------------------------------------------------------------
 // Serializable snapshot types (dates as ISO strings; JSON-safe by design)
 // --------------------------------------------------------------------------
@@ -300,6 +377,51 @@ let pinConfirmed = false;
 let lastBackupAt: string | null = null;
 let lastBackupSize = 0;
 let lastError: string | null = null;
+let lastGoodUserCount: number | null = null; // null = we have never seen a good snapshot
+let checkpoints: CheckpointEntry[] = [];
+let checkpointsLoaded = false;
+
+async function loadCheckpoints(): Promise<CheckpointEntry[]> {
+  if (checkpointsLoaded) return checkpoints;
+  try {
+    const row = await db.setting.findUnique({ where: { key: CHECKPOINTS_SETTING_KEY } });
+    checkpoints = parseCheckpoints(row?.value);
+  } catch {
+    checkpoints = [];
+  }
+  checkpointsLoaded = true;
+  return checkpoints;
+}
+
+async function saveCheckpoints(list: CheckpointEntry[]): Promise<void> {
+  checkpoints = list;
+  await db.setting.upsert({
+    where: { key: CHECKPOINTS_SETTING_KEY },
+    update: { value: JSON.stringify(list) },
+    create: { key: CHECKPOINTS_SETTING_KEY, value: JSON.stringify(list) },
+  });
+}
+
+async function rememberHotMessage(messageId: string): Promise<void> {
+  try {
+    await db.setting.upsert({
+      where: { key: HOT_MESSAGE_SETTING_KEY },
+      update: { value: messageId },
+      create: { key: HOT_MESSAGE_SETTING_KEY, value: messageId },
+    });
+  } catch {
+    // best-effort — the pinned message is the primary pointer
+  }
+}
+
+/** Drop all in-memory upload state (used after a restore so the next flush
+ *  re-discovers the pin instead of editing a message that may be gone). */
+export function resetBackupMemory(): void {
+  lastMessageId = null;
+  pinConfirmed = false;
+  lastGoodUserCount = null;
+  checkpointsLoaded = false;
+}
 
 type Globals = {
   __puffletStateBoot?: Promise<void>;
@@ -321,6 +443,8 @@ export function backupStatus() {
     lastBackupAt,
     lastBackupSize,
     lastError,
+    checkpoints: checkpoints.length,
+    lastCheckpointAt: checkpoints[0]?.at ?? null,
   };
 }
 
@@ -448,7 +572,7 @@ async function buildSnapshotData(): Promise<SnapshotData> {
  * sent and pinned again. Pinning is what lets a FRESH container discover the
  * snapshot on boot.
  */
-export async function flushStateBackup(): Promise<{ ok: boolean; bytes?: number; error?: string }> {
+export async function flushStateBackup(): Promise<{ ok: boolean; bytes?: number; error?: string; checkpointTaken?: boolean }> {
   if (!config.stateBackupEnabled) {
     return { ok: false, error: "State backup is disabled (STATE_BACKUP=false)" };
   }
@@ -459,21 +583,34 @@ export async function flushStateBackup(): Promise<{ ok: boolean; bytes?: number;
   flushing = true;
   try {
     const data = await buildSnapshotData();
-    const bytes = new TextEncoder().encode(serializeSnapshot(data));
+
+    // SAFETY GUARD 1 — never overwrite a good backup with an empty index.
+    // A wiped or failed database must not destroy the only copy of the index
+    // that lives in the storage chat. (Users can never legitimately reach 0:
+    // the owner cannot delete their own account.)
+    const previousGood = lastGoodUserCount ?? (await discoverPinnedMessage() ? 1 : null);
+    if (shouldRefuseEmptySnapshot(data.users.length, previousGood !== null)) {
+      lastError =
+        "Refusing to overwrite the last good backup with an EMPTY index (0 users). If this is intentional, delete the pinned pufflet-state-backup.json message first.";
+      return { ok: false, error: lastError };
+    }
+
+    // SAFETY GUARD 2 — verify the snapshot round-trips before touching the
+    // chat; a corrupt build must never replace the pinned good copy.
+    let text: string;
+    try {
+      text = serializeVerifiedSnapshot(data);
+    } catch (err) {
+      lastError = `Snapshot failed verification, upload skipped: ${err instanceof Error ? err.message : String(err)}`;
+      return { ok: false, error: lastError };
+    }
+    const bytes = new TextEncoder().encode(text);
     const tg = telegram();
     const chatId = config.telegramChatId;
 
     // Resolve the reuse target: in-memory pointer first, then the pinned doc.
-    if (!lastMessageId && tg.getChatPinnedDocument) {
-      try {
-        const pinned = await tg.getChatPinnedDocument(chatId);
-        if (pinned && pinned.fileName === STATE_BACKUP_MARKER) {
-          lastMessageId = pinned.messageId;
-          pinConfirmed = true;
-        }
-      } catch {
-        // Discovery is best-effort; a fresh send still works.
-      }
+    if (!lastMessageId) {
+      await discoverPinnedMessage();
     }
 
     let uploaded = false;
@@ -482,9 +619,21 @@ export async function flushStateBackup(): Promise<{ ok: boolean; bytes?: number;
         await tg.editMessageDocument(chatId, lastMessageId, STATE_BACKUP_MARKER, "application/json", streamFromBytes(bytes));
         uploaded = true;
       } catch {
-        // The message was probably deleted — fall back to a fresh send.
+        // The message was probably deleted (or the pin moved) — re-discover
+        // once before falling back to a fresh send, so we do not orphan the
+        // good copy while a recoverable pointer exists.
         lastMessageId = null;
         pinConfirmed = false;
+        await discoverPinnedMessage();
+        if (lastMessageId && tg.editMessageDocument) {
+          try {
+            await tg.editMessageDocument(chatId, lastMessageId, STATE_BACKUP_MARKER, "application/json", streamFromBytes(bytes));
+            uploaded = true;
+          } catch {
+            lastMessageId = null;
+            pinConfirmed = false;
+          }
+        }
       }
     }
     if (!uploaded) {
@@ -502,16 +651,46 @@ export async function flushStateBackup(): Promise<{ ok: boolean; bytes?: number;
           "Snapshot uploaded but NOT pinned — grant the bot the 'pin messages' admin right so fresh containers can find it. Will retry.";
         lastBackupAt = new Date().toISOString();
         lastBackupSize = bytes.byteLength;
+        lastGoodUserCount = data.users.length;
         dirty = true; // retry (edit + pin) on the next flush
         return { ok: false, error: `${lastError} (${err instanceof Error ? err.message : String(err)})` };
       }
     }
 
+    // Hot message pointer is durable now — remember it in the DB so a restore
+    // can find the snapshot even if the pin is later lost.
+    if (lastMessageId) void rememberHotMessage(lastMessageId).catch(() => {});
+
     dirty = false;
     lastError = null;
     lastBackupAt = new Date().toISOString();
     lastBackupSize = bytes.byteLength;
-    return { ok: true, bytes: bytes.byteLength };
+    lastGoodUserCount = data.users.length;
+
+    // COLD checkpoint: every CHECKPOINT_INTERVAL_MS, send a fresh message so
+    // the previous good snapshot survives a bad hot edit. Best-effort — a
+    // failed checkpoint never marks the backup itself as failed.
+    let checkpointTaken = false;
+    try {
+      const list = await loadCheckpoints();
+      if (shouldCheckpoint(list)) {
+        const stored = await tg.sendDocument(STATE_BACKUP_MARKER, "application/json", streamFromBytes(bytes));
+        const entry: CheckpointEntry = {
+          messageId: stored.messageId,
+          fileId: stored.fileId,
+          at: new Date().toISOString(),
+          size: bytes.byteLength,
+          files: data.counts.files,
+          users: data.counts.users,
+        };
+        await saveCheckpoints(pushCheckpoint(list, entry));
+        checkpointTaken = true;
+      }
+    } catch (err) {
+      console.error("[state-backup] checkpoint failed (hot backup is still good):", err instanceof Error ? err.message : err);
+    }
+
+    return { ok: true, bytes: bytes.byteLength, checkpointTaken };
   } catch (err) {
     lastError = err instanceof Error ? err.message : String(err);
     dirty = true;
@@ -521,10 +700,30 @@ export async function flushStateBackup(): Promise<{ ok: boolean; bytes?: number;
   }
 }
 
+/** Best-effort discovery of the pinned snapshot message. Returns true when a
+ *  Pufflet snapshot pin is (now) known in memory. */
+async function discoverPinnedMessage(): Promise<boolean> {
+  const tg = telegram();
+  if (!tg.getChatPinnedDocument) return false;
+  try {
+    const pinned = await tg.getChatPinnedDocument(config.telegramChatId);
+    if (pinned && pinned.fileName === STATE_BACKUP_MARKER) {
+      lastMessageId = pinned.messageId;
+      pinConfirmed = true;
+      return true;
+    }
+  } catch {
+    // Discovery is best-effort; a fresh send still works.
+  }
+  return false;
+}
+
 /**
  * Boot-time restore: when the DB has no users (fresh container/disk) and a
- * pinned Pufflet snapshot exists in the storage chat, restore it. Safe to
- * call repeatedly — the whole boot sequence runs once per process.
+ * pinned Pufflet snapshot exists in the storage chat, restore it. If the
+ * pinned snapshot cannot be restored, fall back to the newest recorded cold
+ * checkpoint (needs the Setting row, i.e. an intact DB). Safe to call
+ * repeatedly — the whole boot sequence runs once per process.
  */
 export async function restoreIfEmpty(): Promise<{ restored: boolean; reason?: string }> {
   const userCount = await db.user.count();
@@ -534,21 +733,124 @@ export async function restoreIfEmpty(): Promise<{ restored: boolean; reason?: st
   if (!tg.getChatPinnedDocument) return { restored: false, reason: "adapter lacks pinned-document support" };
 
   const pinned = await tg.getChatPinnedDocument(config.telegramChatId);
-  if (!pinned || pinned.fileName !== STATE_BACKUP_MARKER) {
-    return { restored: false, reason: "no Pufflet snapshot pinned in the storage chat" };
+  if (pinned && pinned.fileName === STATE_BACKUP_MARKER) {
+    try {
+      const data = await downloadAndParse(pinned.fileId);
+      await applyInTransaction(data);
+      logRestored(data, "pinned");
+      return { restored: true };
+    } catch (err) {
+      console.error("[state-backup] pinned snapshot restore failed:", err instanceof Error ? err.message : err);
+    }
   }
 
-  const { body } = await tg.openDownloadStream(pinned.fileId);
+  // Fallback: newest cold checkpoint recorded in the Setting table.
+  const list = await loadCheckpoints();
+  for (const cp of list) {
+    try {
+      const data = await downloadAndParse(cp.fileId);
+      await applyInTransaction(data);
+      logRestored(data, `checkpoint ${cp.messageId} (${cp.at})`);
+      return { restored: true };
+    } catch (err) {
+      console.error(`[state-backup] checkpoint ${cp.messageId} restore failed:`, err instanceof Error ? err.message : err);
+    }
+  }
+
+  return {
+    restored: false,
+    reason: pinned
+      ? "snapshot download/parse failed and no usable checkpoint remained"
+      : "no Pufflet snapshot pinned in the storage chat",
+  };
+}
+
+async function downloadAndParse(fileId: string): Promise<SnapshotData> {
+  const { body } = await telegram().openDownloadStream(fileId);
   const text = await readStreamCapped(body, MAX_SNAPSHOT_BYTES);
-  const data = parseSnapshot(text);
+  return parseSnapshot(text);
+}
+
+async function applyInTransaction(data: SnapshotData): Promise<void> {
   await db.$transaction((tx) => applySnapshotData(tx, data), { timeout: 60_000 });
+  // The DB now equals the snapshot: refresh in-memory state so the next
+  // flush re-discovers the pin instead of editing a stale message pointer.
+  resetBackupMemory();
+  lastGoodUserCount = data.counts.users;
+  lastBackupAt = data.exportedAt;
+}
+
+function logRestored(data: SnapshotData, source: string): void {
   console.log(
-    `[state-backup] restored snapshot (exported ${data.exportedAt}): ` +
+    `[state-backup] restored snapshot from ${source} (exported ${data.exportedAt}): ` +
       `${data.counts.users} user(s), ${data.counts.folders} folder(s), ${data.counts.files} file(s), ${data.counts.apiKeys} API key(s)` +
       (data.settings.length ? `, ${data.settings.length} setting(s) incl. vault key` : "") +
       (data.shareLinks.length ? `, ${data.shareLinks.length} share link(s)` : ""),
   );
-  return { restored: true };
+}
+
+/**
+ * Explicit restore over the CURRENT database (Settings -> Data safety).
+ * source "pinned" restores the hot snapshot; source "checkpoint" restores a
+ * recorded cold checkpoint by messageId (validated against the stored ring —
+ * arbitrary Telegram message ids are never accepted).
+ */
+export async function restoreFromBackup(
+  source: "pinned" | "checkpoint",
+  messageId?: string,
+): Promise<{ ok: true; counts: SnapshotData["counts"]; exportedAt: string } | { ok: false; error: string }> {
+  if (!isTelegramConfigured()) return { ok: false, error: "Telegram storage is not configured" };
+  const tg = telegram();
+
+  let fileId: string | null = null;
+  if (source === "pinned") {
+    if (!tg.getChatPinnedDocument) return { ok: false, error: "adapter lacks pinned-document support" };
+    const pinned = await tg.getChatPinnedDocument(config.telegramChatId);
+    if (!pinned || pinned.fileName !== STATE_BACKUP_MARKER) {
+      return { ok: false, error: "no Pufflet snapshot pinned in the storage chat" };
+    }
+    fileId = pinned.fileId;
+  } else {
+    const list = await loadCheckpoints();
+    const cp = messageId ? list.find((c) => c.messageId === messageId) : undefined;
+    if (!cp) return { ok: false, error: "checkpoint not found in the recorded history" };
+    fileId = cp.fileId;
+  }
+
+  try {
+    const data = await downloadAndParse(fileId);
+    await applyInTransaction(data);
+    logRestored(data, source === "pinned" ? "pinned snapshot (manual restore)" : `checkpoint ${messageId} (manual restore)`);
+    return { ok: true, counts: data.counts, exportedAt: data.exportedAt };
+  } catch (err) {
+    const error = `Restore failed: ${err instanceof Error ? err.message : String(err)}`;
+    lastError = error;
+    return { ok: false, error };
+  }
+}
+
+/** Recorded checkpoint ring + pinned-doc probe for the Settings UI. */
+export async function backupHistory(): Promise<{
+  pinned: { found: boolean; messageId?: string; fileName?: string; fileSize?: number };
+  checkpoints: CheckpointEntry[];
+  hotMessageKnown: boolean;
+}> {
+  let pinned: { found: boolean; messageId?: string; fileName?: string; fileSize?: number } = { found: false };
+  if (isTelegramConfigured()) {
+    const tg = telegram();
+    if (tg.getChatPinnedDocument) {
+      try {
+        const doc = await tg.getChatPinnedDocument(config.telegramChatId);
+        if (doc && doc.fileName === STATE_BACKUP_MARKER) {
+          pinned = { found: true, messageId: doc.messageId, fileName: doc.fileName, fileSize: doc.fileSize };
+        }
+      } catch {
+        // best-effort probe
+      }
+    }
+  }
+  const list = await loadCheckpoints();
+  return { pinned, checkpoints: list, hotMessageKnown: Boolean(lastMessageId) };
 }
 
 function startAutoBackupTimer(): void {

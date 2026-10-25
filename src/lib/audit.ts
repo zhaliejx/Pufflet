@@ -28,7 +28,9 @@ export type AuditAction =
   | "folder.restore"
   | "folder.purge"
   | "key.create"
-  | "key.revoke";
+  | "key.revoke"
+  | "backup.flush"
+  | "backup.restore";
 
 // Actions that change data covered by the state snapshot (users, folders,
 // files, API keys). Sessions/audit rows are transient and not snapshotted.
