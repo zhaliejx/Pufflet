@@ -45,7 +45,10 @@ RUN mkdir /prisma-cli && cd /prisma-cli \
     && cp -r /app/node_modules/@prisma/engines node_modules/@prisma/engines
 
 # ---- Local Bot API server binary (prebuilt, musl) ---------------------------
-FROM aiogram/telegram-bot-api:latest AS botapi
+# Pinned: 10.3 removed the old --logverbosity flag, and the binary exits on
+# ANY unrecognized option — so bumps can break boot. Move the pin deliberately
+# (docker/entrypoint.sh keeps to long-stable core flags).
+FROM aiogram/telegram-bot-api:10.3 AS botapi
 
 # ---- runtime ----------------------------------------------------------------
 FROM node:22-alpine AS runner

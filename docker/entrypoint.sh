@@ -50,14 +50,18 @@ if [ -n "${TELEGRAM_API_ID}" ] && [ -n "${TELEGRAM_API_HASH}" ]; then
     BOT_API_DIR="${BOT_API_DIR:-/tmp/pufflet-bot-api}"
     mkdir -p "$BOT_API_DIR/tmp"
     echo "[pufflet] starting embedded Local Bot API server on :8081 (work dir $BOT_API_DIR)..."
+    # NOTE: no --logverbosity here — Bot API 10.x removed that flag (renamed
+    # to --verbosity) and the binary exits with a usage dump on ANY
+    # unrecognized option. Keep this arg list to the long-stable core flags;
+    # verify against `telegram-bot-api --help` of the pinned image version
+    # before adding anything new.
     /usr/local/bin/telegram-bot-api \
       --api-id "$TELEGRAM_API_ID" \
       --api-hash "$TELEGRAM_API_HASH" \
       --local \
       --http-port 8081 \
       --dir "$BOT_API_DIR" \
-      --temp-dir "$BOT_API_DIR/tmp" \
-      --logverbosity 1 > "$BOT_API_DIR/bot-api.log" 2>&1 &
+      --temp-dir "$BOT_API_DIR/tmp" > "$BOT_API_DIR/bot-api.log" 2>&1 &
     echo $! > /tmp/pufflet-bot-api.pid
 
     # Wait until the HTTP endpoint answers (any response, even 404, means up)
