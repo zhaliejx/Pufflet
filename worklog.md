@@ -113,3 +113,22 @@ Stage Summary:
 - User can deploy by pasting an HF write token (I run the script) or running it themselves
 - Pending from user: HF write token, api_id/api_hash, (chat id auto-discovered if a message was posted in the channel recently)
 - After Space is live: delete/suspend the Render proxy service (no longer needed)
+
+---
+Task ID: 15
+Agent: main (Z.ai)
+Task: Fix Render deploy crash "Error: Cannot find module 'effect'" (all-in-one Docker boot)
+
+Work Log:
+- Reproduced locally with an isolated sim (parent node_modules hidden): entrypoint's `node node_modules/prisma/build/index.js db push` dies from @prisma/config/dist/index.js requiring 'effect' — exact user error/stack from Render logs
+- Root cause: bun.lock drifted prisma 6.11 -> 6.19.2; @prisma/config@6.19.2 declares effect@3.18.4 (+c12/fast-check/jiti/chokidar/... ~35-pkg closure) while the Dockerfile runner copied only node_modules/prisma + @prisma + .prisma
+- Confirmed next@16.1.3 does NOT use effect (standalone app clean); verified next has no require('effect') in dist
+- Dockerfile fix: builder stage now creates a self-contained prisma CLI install (/prisma-cli, bun resolves full closure from the same locked prisma version) and grafts the main install's pre-downloaded @prisma/engines; runner copies /prisma-cli/node_modules (merges into standalone's traced node_modules) + .prisma + prisma/ schema
+- Verified end-to-end via simulated runner assembly (standalone + prisma-cli node_modules + schema + entrypoint, parent node_modules hidden): db push OK, Next ready in 78ms, /api/health {"ok":true,database:up}, /api/auth/state defaultUserActive:true; old subset repro crashed, new assembly boots clean
+- README: new "Option B2 — Render (free tier, same all-in-one image)" (Docker runtime auto-detect, port/health-check notes, env matrix: TELEGRAM_API_BASE external server vs TELEGRAM_API_ID/HASH embedded 2000MB, ephemeral-disk caveats — embedded bot-api file cache dies on restart on free tier, Disk at /app/db for paid); Option C heading trimmed; cross-ref updated
+- Housekeeping: killed leftover sim server, removed .sim; lint clean again (8 lint errors were .sim build output being scanned), 36/36 unit tests pass
+- Committed 295fe53, pushed to main (token in push URL only)
+
+Stage Summary:
+- Render deploy crash root-caused (Prisma 7-style CLI closure debt arrived in 6.19) and fixed at the Dockerfile level so any future closure growth is auto-resolved by bun
+- User action: Render auto-deploys on push — watch the new build; boot log should show "[pufflet] syncing database schema (prisma db push)..." followed by "Ready"
