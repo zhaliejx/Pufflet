@@ -3,7 +3,7 @@
 # Requires: dev server on :3000, telegram-mock on :3031 (see mini-services).
 # Usage: bash scripts/e2e_api_test.sh
 set -u
-BASE="http://localhost:3000"
+BASE="${PUFFLET_E2E_BASE:-http://localhost:3000}"
 EMAIL="owner@pufflet.test"
 PASS="pufflet123"
 PASS_COUNT=0
@@ -212,6 +212,94 @@ V1SLID=$(echo "$V1SH" | sed 's/.*"link":{"id":"\([^"]*\)".*/\1/')
 curl -s -X DELETE "$BASE/api/v1/files/$ID2/share?linkId=$V1SLID" -H "Authorization: Bearer $TOK" >/dev/null
 code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/v1/files/$ID2/share" -H "Authorization: Bearer $TOKR" -H 'content-type: application/json' -d '{}')
 check "revoked read-only key cannot share (401)" "$code" "401"
+
+say "== 12. listing performance contract (metadata-only + pagination) =="
+PL=$(curl -s "$BASE/api/files?view=folder&limit=1" -b "$COOKIE")
+contains "limit=1 returns exactly one file" "$PL" '"total"'
+N1=$(echo "$PL" | grep -o '"id"' | wc -l)
+# one file object = 1 "id" occurrence (folders list absent from /api/files)
+check "limit param honored" "$N1" "1"
+if echo "$PL" | grep -q 'tgFileId\|tgChatId\|tgMessageId'; then
+  FAIL_COUNT=$((FAIL_COUNT+1)); say "  FAIL: listing leaks Telegram storage refs"
+else
+  PASS_COUNT=$((PASS_COUNT+1)); say "  ok: listings carry metadata only (no tg* refs)"
+fi
+P2=$(curl -s "$BASE/api/files?view=folder&limit=1&offset=1" -b "$COOKIE")
+contains "offset paginates (total still present)" "$P2" '"total"'
+NS=$(curl -s "$BASE/api/files?view=search&q=zzznone" -b "$COOKIE")
+contains "search empty has total field" "$NS" '"total":0'
+
+say "== 13. bulk operations =="
+printf 'bulk a %s' "$RANDOM" > "$T/ba.txt"
+printf 'bulk b %s' "$RANDOM" > "$T/bb.txt"
+BA=$(upload "$COOKIE" "bulk-a.txt" "$T/ba.txt"); BAID=$(echo "$BA" | sed 's/.*"id":"\([^"]*\)".*/\1/')
+BB=$(upload "$COOKIE" "bulk-b.txt" "$T/bb.txt"); BBID=$(echo "$BB" | sed 's/.*"id":"\([^"]*\)".*/\1/')
+FB=$(curl -s -X POST "$BASE/api/folders" -b "$COOKIE" -H 'content-type: application/json' -d '{"name":"BulkTarget"}')
+FBID=$(echo "$FB" | sed 's/.*"id":"\([^"]*\)".*/\1/')
+BT=$(curl -s -X POST "$BASE/api/files/bulk" -b "$COOKIE" -H 'content-type: application/json' -d "{\"action\":\"trash\",\"ids\":[\"$BAID\",\"$BBID\"]}")
+contains "bulk trash succeeds" "$BT" '"succeeded":2'
+BTR=$(curl -s "$BASE/api/files?view=trash" -b "$COOKIE")
+contains "bulk-trashed files visible in trash" "$BTR" 'bulk-a.txt'
+BR=$(curl -s -X POST "$BASE/api/files/bulk" -b "$COOKIE" -H 'content-type: application/json' -d "{\"action\":\"restore\",\"ids\":[\"$BAID\",\"$BBID\"]}")
+contains "bulk restore succeeds" "$BR" '"succeeded":2'
+BS=$(curl -s -X POST "$BASE/api/files/bulk" -b "$COOKIE" -H 'content-type: application/json' -d "{\"action\":\"star\",\"ids\":[\"$BAID\"]}")
+contains "bulk star succeeds" "$BS" '"succeeded":1'
+BM=$(curl -s -X POST "$BASE/api/files/bulk" -b "$COOKIE" -H 'content-type: application/json' -d "{\"action\":\"move\",\"ids\":[\"$BAID\",\"$BBID\"],\"folderId\":\"$FBID\"}")
+contains "bulk move succeeds" "$BM" '"succeeded":2'
+IN=$(curl -s "$BASE/api/files/$BAID" -b "$COOKIE")
+contains "moved file landed in target folder" "$IN" "\"folderId\":\"$FBID\""
+BAD=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/files/bulk" -b "$COOKIE" -H 'content-type: application/json' -d '{"action":"explode","ids":[]}')
+check "invalid bulk action rejected (400)" "$BAD" "400"
+
+say "== 14. folder bulk + trash shows folders =="
+FT=$(curl -s -X POST "$BASE/api/folders/bulk" -b "$COOKIE" -H 'content-type: application/json' -d "{\"action\":\"trash\",\"ids\":[\"$FBID\"]}")
+contains "folder bulk trash succeeds" "$FT" '"succeeded":1'
+FLD=$(curl -s "$BASE/api/folders?all=1" -b "$COOKIE")
+contains "trashed folder visible with trashedAt" "$FLD" '"trashedAt"'
+FR=$(curl -s -X POST "$BASE/api/folders/bulk" -b "$COOKIE" -H 'content-type: application/json' -d "{\"action\":\"restore\",\"ids\":[\"$FBID\"]}")
+contains "folder bulk restore succeeds" "$FR" '"succeeded":1'
+IN2=$(curl -s "$BASE/api/files/$BAID" -b "$COOKIE")
+contains "subtree restore brought file back" "$IN2" '"id"'
+
+say "== 15. dashboard overview + share management =="
+OV=$(curl -s "$BASE/api/overview" -b "$COOKIE")
+contains "overview has byType breakdown" "$OV" '"byType"'
+contains "overview has recent activity" "$OV" '"recent"'
+contains "overview has active share count" "$OV" '"activeShares"'
+if echo "$OV" | grep -q 'capacity\|quota'; then
+  FAIL_COUNT=$((FAIL_COUNT+1)); say "  FAIL: overview invents capacity data"
+else
+  PASS_COUNT=$((PASS_COUNT+1)); say "  ok: overview never invents capacity"
+fi
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/overview")
+check "overview requires session (401)" "$code" "401"
+SHX=$(curl -s -X POST "$BASE/api/files/$BAID/share" -b "$COOKIE" -H 'content-type: application/json' -d '{"expiresInDays":7}')
+contains "share with expiry created" "$SHX" '"expiresAt"'
+SHXLID=$(echo "$SHX" | sed 's/.*"link":{"id":"\([^"]*\)".*/\1/')
+ALLSH=$(curl -s "$BASE/api/shares" -b "$COOKIE")
+contains "shares endpoint lists the link" "$ALLSH" 'bulk-a.txt'
+contains "shares endpoint shows expiry" "$ALLSH" '"expiresAt"'
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/shares")
+check "shares endpoint requires session (401)" "$code" "401"
+curl -s -X DELETE "$BASE/api/files/$BAID/share?linkId=$SHXLID" -b "$COOKIE" >/dev/null
+ALLSH2=$(curl -s "$BASE/api/shares" -b "$COOKIE")
+if echo "$ALLSH2" | grep -q "$SHXLID"; then
+  FAIL_COUNT=$((FAIL_COUNT+1)); say "  FAIL: revoked link still listed"
+else
+  PASS_COUNT=$((PASS_COUNT+1)); say "  ok: revoked link disappears from management list"
+fi
+
+say "== 16. empty trash includes folders =="
+ETD=$(curl -s -X POST "$BASE/api/folders" -b "$COOKIE" -H 'content-type: application/json' -d '{"name":"DoomedFolder"}')
+ETDID=$(echo "$ETD" | sed 's/.*"id":"\([^"]*\)".*/\1/')
+printf 'doomed %s' "$RANDOM" > "$T/d.txt"
+DF=$(upload "$COOKIE" "doomed.txt" "$T/d.txt"); DFID=$(echo "$DF" | sed 's/.*"id":"\([^"]*\)".*/\1/')
+curl -s -X PATCH "$BASE/api/files/$DFID" -b "$COOKIE" -H 'content-type: application/json' -d "{\"folderId\":\"$ETDID\"}" >/dev/null
+curl -s -X DELETE "$BASE/api/folders/$ETDID" -b "$COOKIE" >/dev/null
+ET=$(curl -s -X POST "$BASE/api/trash/empty?confirm=yes" -b "$COOKIE")
+contains "empty trash reports folder purge" "$ET" '"foldersPurged"'
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/files/$DFID" -b "$COOKIE")
+check "folder purge removed inner file (404)" "$code" "404"
 
 say ""
 say "==================================="
