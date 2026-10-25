@@ -132,3 +132,20 @@ Work Log:
 Stage Summary:
 - Render deploy crash root-caused (Prisma 7-style CLI closure debt arrived in 6.19) and fixed at the Dockerfile level so any future closure growth is auto-resolved by bun
 - User action: Render auto-deploys on push — watch the new build; boot log should show "[pufflet] syncing database schema (prisma db push)..." followed by "Ready"
+
+---
+Task ID: 16
+Agent: main (Z.ai)
+Task: Diagnose Render "No open ports detected" after effect fix; harden entrypoint boot path
+
+Work Log:
+- Read user's Render log screenshot (deploy 295fe53): db push now passes (effect fix confirmed live on Render); visible log line is telegram-bot-api printing its USAGE text (--proxy=<arg> ... webhook) -> binary exits on invalid args
+- Root cause: user's embedded-mode env rejected — almost certainly TELEGRAM_API_ID not a plain number (quotes/spaces pasted, or api_hash in the id field); old entrypoint then probed the dead server 120x0.5s (~60-80s incl. node spawn) before starting Next.js, so Render's port scan saw nothing ("No open ports detected, continuing to scan...")
+- docker/entrypoint.sh hardened: TELEGRAM_API_ID numeric validation (case *[!0-9]*) -> skip embedded with loud warning; wait loop now kill -0 fail-fast when the bot-api process dies; graceful fallback (no TELEGRAM_API_BASE export -> hosted limits) instead of pointing the app at a dead :8081; active boot mode logged for all three paths (embedded/external/hosted); readiness wait capped at 45s
+- New scripts/test-entrypoint.sh: stub-based POSIX branch tests, all 5 cases pass (non-numeric skip, instant-death fail-fast, healthy embedded w/ 2000MB, external base, hosted)
+- README Option B2: TELEGRAM_API_ID must be plain numeric clarification
+- Committed 92da261, pushed (token in push URL only)
+
+Stage Summary:
+- Boot path can no longer stall ~80s or silently point at a dead embedded server; every boot logs its storage mode
+- User actions: fix/clean TELEGRAM_API_ID+HASH values (or switch to TELEGRAM_API_BASE-only mode), redeploy 92da261; if it still fails, send the [pufflet] log lines
