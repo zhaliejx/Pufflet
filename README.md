@@ -241,6 +241,22 @@ Free Spaces sleep after ~48 h of inactivity and wipe their disk on every
 restart — Pufflet's **state backup** (below) restores everything automatically
 within seconds of waking up.
 
+> **Space wizard tip:** pick the **Docker** SDK — not *Static* (a Static Space
+> only serves fixed HTML and cannot run Pufflet's server). Then you can skip
+> the manual steps and deploy in one command:
+>
+> ```bash
+> node scripts/deploy_hf.mjs \
+>   HF_TOKEN=hf_xxx \
+>   TELEGRAM_BOT_TOKEN=123:ABC \
+>   TELEGRAM_API_ID=1234567 TELEGRAM_API_HASH=abcdef \
+>   --logout
+> ```
+>
+> The script verifies your HF token, discovers + validates the storage chat,
+> creates the Space, pushes the code, sets the secrets, performs the one-time
+> hosted `logOut`, and waits for the build — then prints the first-login steps.
+
 1. **Telegram prep** (same as the Quick start): bot token via @BotFather, a
    private storage channel where the bot is admin with post + delete + **pin**
    rights, and `api_id` + `api_hash` from
@@ -368,6 +384,7 @@ prisma/schema.prisma        data model (SQLite default; Postgres variant in sche
 Dockerfile                  ALL-IN-ONE image (app + embedded Local Bot API, port 7860)
 docker-compose.yml          app + Local Bot API sidecar variant (2000 MB)
 scripts/tg-logout.mjs       one-time hosted->local Bot API migration (npm run tg:logout)
+scripts/deploy_hf.mjs       one-command deploy to a free Hugging Face Space (Docker SDK)
 scripts/gen_logo.py         regenerates the SVG logo from the original design
 scripts/e2e_api_test.sh     end-to-end API test suite
 mini-services/telegram-mock local mock Bot API for tests/demos
