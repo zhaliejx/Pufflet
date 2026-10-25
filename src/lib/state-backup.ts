@@ -22,7 +22,7 @@
 
 import { db } from "@/lib/db";
 import { config, isTelegramConfigured } from "@/lib/config";
-import { telegram } from "@/lib/telegram";
+import { telegram, TelegramError } from "@/lib/telegram";
 import type { Prisma } from "@prisma/client";
 
 export const SNAPSHOT_VERSION = 3;
@@ -95,6 +95,15 @@ export function shouldCheckpoint(
  *  must never destroy the only copy of the index in the storage chat). */
 export function shouldRefuseEmptySnapshot(users: number, hasPreviousGood: boolean): boolean {
   return users === 0 && hasPreviousGood;
+}
+
+/** Verify an upload actually transferred the whole snapshot: the Bot API
+ *  reports the stored document size; a mismatch means the bytes did not
+ *  arrive intact and the flush must be treated as FAILED (the previous good
+ *  snapshot stays untouched because editMessageMedia is atomic). A reported
+ *  size of 0 means "unknown" — nothing to compare. */
+export function verifySnapshotUpload(localBytes: number, reportedSize: number | null | undefined): boolean {
+  return !reportedSize || reportedSize === localBytes;
 }
 
 /** Serialize, then re-parse and re-serialize to prove the snapshot survives a
@@ -252,8 +261,21 @@ export function parseSnapshot(text: string): SnapshotData {
  * Restore the snapshot inside a transaction. Keeps all row ids so Telegram
  * references (message/file ids) stay valid. Folder self-references are linked
  * in a second pass because every row must exist before a parentId points at it.
+ *
+ * Defensive: rows whose relations point OUTSIDE the snapshot (a torn read
+ * during a concurrent mutation, or a hand-edited file) are pruned instead of
+ * crashing the whole restore — a partially-restorable snapshot restores the
+ * rows it can and logs what it dropped, never throwing FK violations.
  */
-export async function applySnapshotData(tx: Prisma.TransactionClient, data: SnapshotData): Promise<void> {
+export async function applySnapshotData(tx: Prisma.TransactionClient, raw: SnapshotData): Promise<void> {
+  const pruned = pruneDanglingRefs(raw);
+  const data = pruned.data;
+  if (pruned.droppedTotal > 0) {
+    console.log(
+      `[state-backup] pruned dangling rows from snapshot: ` +
+        `${pruned.dropped.files} file(s), ${pruned.dropped.folders} folder(s), ${pruned.dropped.apiKeys} API key(s), ${pruned.dropped.shareLinks} share link(s)`,
+    );
+  }
   // Wipe (children first; folders self-reference so null the pointer first).
   await tx.auditEvent.deleteMany({});
   await tx.uploadJob.deleteMany({});
@@ -364,6 +386,79 @@ export async function applySnapshotData(tx: Prisma.TransactionClient, data: Snap
       },
     });
   }
+}
+
+// --------------------------------------------------------------------------
+// Snapshot sanitation (pure, unit-tested)
+// --------------------------------------------------------------------------
+
+export interface PruneResult {
+  data: SnapshotData;
+  dropped: { files: number; folders: number; apiKeys: number; shareLinks: number };
+  droppedTotal: number;
+}
+
+/**
+ * Drop snapshot rows whose required relations are missing from the snapshot:
+ *   - folders whose owner is absent (or whose whole ancestor chain is absent)
+ *   - files whose owner or folder is absent
+ *   - API keys whose user is absent
+ *   - share links whose file or creator is absent
+ * This makes restores total: a torn snapshot (built while a concurrent move
+ * or upload was in flight) restores cleanly instead of dying on an FK violation.
+ */
+export function pruneDanglingRefs(input: SnapshotData): PruneResult {
+  const userIds = new Set(input.users.map((u) => u.id));
+
+  // Fixpoint: a folder survives when its owner survives and its parent is
+  // also surviving (or it has none). Handles arbitrarily deep chains.
+  const keptFolders = new Map<string, SnapshotFolder>();
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const f of input.folders) {
+      if (keptFolders.has(f.id)) continue;
+      if (!userIds.has(f.ownerId)) continue;
+      if (f.parentId && !keptFolders.has(f.parentId)) continue;
+      keptFolders.set(f.id, f);
+      changed = true;
+    }
+  }
+
+  const keptFiles = input.files.filter(
+    (f) => userIds.has(f.ownerId) && (!f.folderId || keptFolders.has(f.folderId)),
+  );
+  const fileIds = new Set(keptFiles.map((f) => f.id));
+  const keptKeys = input.apiKeys.filter((k) => userIds.has(k.userId));
+  const keptLinks = input.shareLinks.filter((l) => fileIds.has(l.fileId) && userIds.has(l.createdBy));
+
+  const dropped = {
+    files: input.files.length - keptFiles.length,
+    folders: input.folders.length - keptFolders.size,
+    apiKeys: input.apiKeys.length - keptKeys.length,
+    shareLinks: input.shareLinks.length - keptLinks.length,
+  };
+  const droppedTotal = dropped.files + dropped.folders + dropped.apiKeys + dropped.shareLinks;
+  if (droppedTotal === 0) return { data: input, dropped, droppedTotal: 0 };
+
+  return {
+    data: {
+      ...input,
+      folders: [...keptFolders.values()],
+      files: keptFiles,
+      apiKeys: keptKeys,
+      shareLinks: keptLinks,
+      counts: {
+        ...input.counts,
+        folders: keptFolders.size,
+        files: keptFiles.length,
+        apiKeys: keptKeys.length,
+        shareLinks: keptLinks.length,
+      },
+    },
+    dropped,
+    droppedTotal,
+  };
 }
 
 // --------------------------------------------------------------------------
@@ -480,14 +575,20 @@ async function readStreamCapped(stream: ReadableStream<Uint8Array>, cap: number)
 }
 
 async function buildSnapshotData(): Promise<SnapshotData> {
-  const [users, folders, files, apiKeys, settings, shareLinks] = await Promise.all([
-    db.user.findMany({ orderBy: { createdAt: "asc" } }),
-    db.folder.findMany({ orderBy: { createdAt: "asc" } }),
-    db.file.findMany({ orderBy: { createdAt: "asc" } }),
-    db.apiKey.findMany({ orderBy: { createdAt: "asc" } }),
-    db.setting.findMany({ orderBy: { key: "asc" } }),
-    db.shareLink.findMany({ orderBy: { createdAt: "asc" } }),
-  ]);
+  // One transaction: a consistent read of all six tables. Without it, a move
+  // or upload racing the snapshot could embed a file whose folder row is
+  // missing — an FK violation that would crash every future restore of that
+  // snapshot. (Residual races are still covered by pruneDanglingRefs.)
+  const [users, folders, files, apiKeys, settings, shareLinks] = await db.$transaction(
+    [
+      db.user.findMany({ orderBy: { createdAt: "asc" } }),
+      db.folder.findMany({ orderBy: { createdAt: "asc" } }),
+      db.file.findMany({ orderBy: { createdAt: "asc" } }),
+      db.apiKey.findMany({ orderBy: { createdAt: "asc" } }),
+      db.setting.findMany({ orderBy: { key: "asc" } }),
+      db.shareLink.findMany({ orderBy: { createdAt: "asc" } }),
+    ],
+  );
   const data: SnapshotData = {
     version: SNAPSHOT_VERSION,
     exportedAt: new Date().toISOString(),
@@ -571,6 +672,11 @@ async function buildSnapshotData(): Promise<SnapshotData> {
  * flood the chat; if the message vanished (user deleted it), a fresh one is
  * sent and pinned again. Pinning is what lets a FRESH container discover the
  * snapshot on boot.
+ *
+ * Failure philosophy: a failed or unverifiable flush NEVER replaces the last
+ * known-good snapshot (editMessageMedia is atomic and the guards below refuse
+ * empty/corrupt builds before any upload), failures are logged server-side,
+ * and transient Telegram faults get one bounded retry before reporting.
  */
 export async function flushStateBackup(): Promise<{ ok: boolean; bytes?: number; error?: string; checkpointTaken?: boolean }> {
   if (!config.stateBackupEnabled) {
@@ -587,11 +693,16 @@ export async function flushStateBackup(): Promise<{ ok: boolean; bytes?: number;
     // SAFETY GUARD 1 — never overwrite a good backup with an empty index.
     // A wiped or failed database must not destroy the only copy of the index
     // that lives in the storage chat. (Users can never legitimately reach 0:
-    // the owner cannot delete their own account.)
-    const previousGood = lastGoodUserCount ?? (await discoverPinnedMessage() ? 1 : null);
-    if (shouldRefuseEmptySnapshot(data.users.length, previousGood !== null)) {
+    // the owner cannot delete their own account.) Hardened: when the pinned
+    // snapshot's existence is UNKNOWN (Telegram probe failed), assume a good
+    // backup is present and refuse — only a definitive "no pin found" allows
+    // a 0-user snapshot through.
+    const pinState = lastMessageId ? ("found" as const) : await probePinnedSnapshot();
+    const previousGood = lastGoodUserCount ?? (pinState === "found" ? 1 : null);
+    if (shouldRefuseEmptySnapshot(data.users.length, previousGood !== null) || (data.users.length === 0 && pinState === "unknown")) {
       lastError =
         "Refusing to overwrite the last good backup with an EMPTY index (0 users). If this is intentional, delete the pinned pufflet-state-backup.json message first.";
+      console.error("[state-backup]", lastError);
       return { ok: false, error: lastError };
     }
 
@@ -602,6 +713,7 @@ export async function flushStateBackup(): Promise<{ ok: boolean; bytes?: number;
       text = serializeVerifiedSnapshot(data);
     } catch (err) {
       lastError = `Snapshot failed verification, upload skipped: ${err instanceof Error ? err.message : String(err)}`;
+      console.error("[state-backup]", lastError);
       return { ok: false, error: lastError };
     }
     const bytes = new TextEncoder().encode(text);
@@ -613,11 +725,26 @@ export async function flushStateBackup(): Promise<{ ok: boolean; bytes?: number;
       await discoverPinnedMessage();
     }
 
-    let uploaded = false;
+    /** One bounded retry for transient Telegram faults (429/5xx/network). */
+    async function uploadOnce<T>(send: () => Promise<T>): Promise<T> {
+      try {
+        return await send();
+      } catch (err) {
+        const retryable = !(err instanceof TelegramError) || err.retryable;
+        if (!retryable) throw err;
+        console.warn("[state-backup] transient upload failure, retrying once:", err instanceof Error ? err.message : err);
+        await new Promise((r) => setTimeout(r, 1_500));
+        return send();
+      }
+    }
+
+    let uploadedSize: number | null = null;
     if (lastMessageId && tg.editMessageDocument) {
       try {
-        await tg.editMessageDocument(chatId, lastMessageId, STATE_BACKUP_MARKER, "application/json", streamFromBytes(bytes));
-        uploaded = true;
+        const edited = await uploadOnce(() =>
+          tg.editMessageDocument!(chatId, lastMessageId!, STATE_BACKUP_MARKER, "application/json", streamFromBytes(bytes)),
+        );
+        uploadedSize = edited.size;
       } catch {
         // The message was probably deleted (or the pin moved) — re-discover
         // once before falling back to a fresh send, so we do not orphan the
@@ -627,8 +754,10 @@ export async function flushStateBackup(): Promise<{ ok: boolean; bytes?: number;
         await discoverPinnedMessage();
         if (lastMessageId && tg.editMessageDocument) {
           try {
-            await tg.editMessageDocument(chatId, lastMessageId, STATE_BACKUP_MARKER, "application/json", streamFromBytes(bytes));
-            uploaded = true;
+            const edited = await uploadOnce(() =>
+              tg.editMessageDocument!(chatId, lastMessageId!, STATE_BACKUP_MARKER, "application/json", streamFromBytes(bytes)),
+            );
+            uploadedSize = edited.size;
           } catch {
             lastMessageId = null;
             pinConfirmed = false;
@@ -636,10 +765,20 @@ export async function flushStateBackup(): Promise<{ ok: boolean; bytes?: number;
         }
       }
     }
-    if (!uploaded) {
-      const stored = await tg.sendDocument(STATE_BACKUP_MARKER, "application/json", streamFromBytes(bytes));
+    if (uploadedSize === null) {
+      const stored = await uploadOnce(() => tg.sendDocument(STATE_BACKUP_MARKER, "application/json", streamFromBytes(bytes)));
+      uploadedSize = stored.size;
       lastMessageId = stored.messageId;
       pinConfirmed = false;
+    }
+
+    // SAFETY GUARD 3 — the storage server must have received the WHOLE
+    // snapshot. A truncated upload must not be reported as success.
+    if (!verifySnapshotUpload(bytes.byteLength, uploadedSize)) {
+      lastError = `Snapshot upload incomplete (Telegram received ${uploadedSize} of ${bytes.byteLength} bytes) — previous backup left untouched, will retry.`;
+      console.error("[state-backup]", lastError);
+      dirty = true;
+      return { ok: false, error: lastError };
     }
 
     if (!pinConfirmed && lastMessageId && tg.pinChatMessage) {
@@ -649,6 +788,7 @@ export async function flushStateBackup(): Promise<{ ok: boolean; bytes?: number;
       } catch (err) {
         lastError =
           "Snapshot uploaded but NOT pinned — grant the bot the 'pin messages' admin right so fresh containers can find it. Will retry.";
+        console.error("[state-backup]", lastError, err instanceof Error ? err.message : err);
         lastBackupAt = new Date().toISOString();
         lastBackupSize = bytes.byteLength;
         lastGoodUserCount = data.users.length;
@@ -674,17 +814,24 @@ export async function flushStateBackup(): Promise<{ ok: boolean; bytes?: number;
     try {
       const list = await loadCheckpoints();
       if (shouldCheckpoint(list)) {
-        const stored = await tg.sendDocument(STATE_BACKUP_MARKER, "application/json", streamFromBytes(bytes));
-        const entry: CheckpointEntry = {
-          messageId: stored.messageId,
-          fileId: stored.fileId,
-          at: new Date().toISOString(),
-          size: bytes.byteLength,
-          files: data.counts.files,
-          users: data.counts.users,
-        };
-        await saveCheckpoints(pushCheckpoint(list, entry));
-        checkpointTaken = true;
+        const stored = await uploadOnce(() => tg.sendDocument(STATE_BACKUP_MARKER, "application/json", streamFromBytes(bytes)));
+        if (verifySnapshotUpload(bytes.byteLength, stored.size)) {
+          const entry: CheckpointEntry = {
+            messageId: stored.messageId,
+            fileId: stored.fileId,
+            at: new Date().toISOString(),
+            size: bytes.byteLength,
+            files: data.counts.files,
+            users: data.counts.users,
+          };
+          await saveCheckpoints(pushCheckpoint(list, entry));
+          checkpointTaken = true;
+          console.log(
+            `[state-backup] cold checkpoint stored: ${entry.files} file(s), ${entry.users} user(s), ${entry.size} bytes`,
+          );
+        } else {
+          console.error("[state-backup] checkpoint upload incomplete — ring not advanced (hot backup is still good)");
+        }
       }
     } catch (err) {
       console.error("[state-backup] checkpoint failed (hot backup is still good):", err instanceof Error ? err.message : err);
@@ -694,6 +841,7 @@ export async function flushStateBackup(): Promise<{ ok: boolean; bytes?: number;
   } catch (err) {
     lastError = err instanceof Error ? err.message : String(err);
     dirty = true;
+    console.error("[state-backup] flush failed (previous snapshot untouched):", lastError);
     return { ok: false, error: lastError };
   } finally {
     flushing = false;
@@ -716,6 +864,22 @@ async function discoverPinnedMessage(): Promise<boolean> {
     // Discovery is best-effort; a fresh send still works.
   }
   return false;
+}
+
+/**
+ * Probe whether a Pufflet snapshot pin exists, distinguishing "definitely
+ * absent" from "could not tell" (network/API failure). The empty-index guard
+ * uses this: when unknown, flushing an empty snapshot is refused.
+ */
+async function probePinnedSnapshot(): Promise<"found" | "absent" | "unknown"> {
+  const tg = telegram();
+  if (!tg.getChatPinnedDocument) return "unknown";
+  try {
+    const pinned = await tg.getChatPinnedDocument(config.telegramChatId);
+    return pinned && pinned.fileName === STATE_BACKUP_MARKER ? "found" : "absent";
+  } catch {
+    return "unknown";
+  }
 }
 
 /**

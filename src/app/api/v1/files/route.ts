@@ -10,14 +10,25 @@ export const GET = withToken("read", async (req, principal) => {
   if (!VIEWS.includes(view)) {
     return Response.json({ error: { message: "Invalid view" } }, { status: 400 });
   }
-  const files = await listFiles(principal.userId, {
+  const intParam = (key: string): number | undefined => {
+    const raw = url.searchParams.get(key);
+    if (!raw) return undefined;
+    const n = Number.parseInt(raw, 10);
+    return Number.isFinite(n) && n >= 0 ? n : undefined;
+  };
+  const { files, total } = await listFiles(principal.userId, {
     view,
     folderId: url.searchParams.get("folderId"),
     q: url.searchParams.get("q") ?? undefined,
     sort: (url.searchParams.get("sort") as "name" | "size" | "updatedAt" | null) ?? undefined,
     dir: (url.searchParams.get("dir") as "asc" | "desc" | null) ?? undefined,
+    limit: intParam("limit"),
+    offset: intParam("offset"),
   });
-  return Response.json({ files });
+  return Response.json(
+    { files, total },
+    { headers: { "cache-control": "no-store" } },
+  );
 });
 
 interface Body {

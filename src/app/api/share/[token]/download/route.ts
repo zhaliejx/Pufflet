@@ -22,6 +22,18 @@ export async function GET(req: Request, ctx: Ctx) {
   try {
     const { link, file } = await resolveShareLink(token);
 
+    const wantsInline = new URL(req.url).searchParams.get("inline") === "1";
+    const inline = wantsInline && isPublicInlineSafe(file.mimeType);
+    const etag = `"${file.tgFileUniqueId}-${file.size}"`;
+    const cacheControl = inline ? "private, max-age=3600" : "private, no-store";
+
+    // Conditional request fast path — unchanged revision: no Telegram
+    // round-trip, and no double-counted downloads for repeat previews.
+    const ifNoneMatch = req.headers.get("if-none-match");
+    if (ifNoneMatch && ifNoneMatch.split(",").map((s) => s.trim()).includes(etag)) {
+      return new Response(null, { status: 304, headers: { etag, "cache-control": cacheControl } });
+    }
+
     const { body, repaired } = await telegram().openDownloadStream(file.tgFileId!);
     if (repaired) {
       // Stale reference healed — persist the fresh ids (best-effort, no leak).
@@ -30,8 +42,6 @@ export async function GET(req: Request, ctx: Ctx) {
     }
     const decoded = await decodeDownloadStream(body);
 
-    const wantsInline = new URL(req.url).searchParams.get("inline") === "1";
-    const inline = wantsInline && isPublicInlineSafe(file.mimeType);
     audit("share.download", null, file.id, `link ${link.id}`);
     void recordShareDownload(link.id);
 
@@ -40,7 +50,8 @@ export async function GET(req: Request, ctx: Ctx) {
         "content-type": file.mimeType || "application/octet-stream",
         "content-length": String(file.size),
         "content-disposition": contentDisposition(inline ? "inline" : "attachment", file.name),
-        "cache-control": "private, no-store",
+        "cache-control": cacheControl,
+        etag,
         "x-content-type-options": "nosniff",
       },
     });

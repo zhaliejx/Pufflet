@@ -10,7 +10,7 @@ import { telegram } from "@/lib/telegram";
 import { audit } from "@/lib/audit";
 import { encodeUploadStream, obfuscatedStorageName } from "@/lib/vault";
 import { markStateDirty } from "@/lib/state-backup";
-import { Folder, File } from "@prisma/client";
+import { Folder, File, Prisma } from "@prisma/client";
 
 export class ServiceError extends Error {
   constructor(message: string, public readonly status: number = 400, public readonly code?: string) {
@@ -115,6 +115,8 @@ export interface ListOptions {
   q?: string;
   sort?: "name" | "size" | "updatedAt";
   dir?: "asc" | "desc";
+  limit?: number;
+  offset?: number;
 }
 
 const SORT_FIELDS = {
@@ -123,48 +125,76 @@ const SORT_FIELDS = {
   updatedAt: "updatedAt",
 } as const;
 
-export async function listFiles(ownerId: string, opts: ListOptions) {
+/** Default/max page size for listings (large folders load incrementally). */
+export const LIST_PAGE_DEFAULT = 300;
+const LIST_PAGE_MAX = 1000;
+
+/**
+ * Metadata-only projection for listings: never ships Telegram storage
+ * references, checksums or provenance to clients. Keeps listing payloads
+ * small (the tg* columns are the longest fields in the row) and stops
+ * internal storage identifiers from leaking through list responses.
+ */
+export const FILE_LIST_SELECT = {
+  id: true,
+  name: true,
+  size: true,
+  mimeType: true,
+  status: true,
+  starred: true,
+  folderId: true,
+  trashedAt: true,
+  createdAt: true,
+  updatedAt: true,
+} as const;
+
+type FileListRow = Pick<File, keyof typeof FILE_LIST_SELECT>;
+
+export async function listFiles(
+  ownerId: string,
+  opts: ListOptions,
+): Promise<{ files: FileListRow[]; total: number }> {
+  const limit = Math.min(Math.max(1, opts.limit ?? LIST_PAGE_DEFAULT), LIST_PAGE_MAX);
+  const offset = Math.max(0, opts.offset ?? 0);
   const order = {
     [SORT_FIELDS[opts.sort ?? "updatedAt"]]: opts.dir ?? (opts.sort === "name" ? "asc" : "desc"),
   };
 
+  async function page(where: Prisma.FileWhereInput, cap = limit): Promise<{ files: FileListRow[]; total: number }> {
+    const [files, total] = await Promise.all([
+      db.file.findMany({
+        where,
+        orderBy: order,
+        select: FILE_LIST_SELECT,
+        take: Math.min(limit, cap),
+        skip: offset,
+      }),
+      db.file.count({ where }),
+    ]);
+    return { files, total };
+  }
+
   if (opts.view === "folder") {
     if (opts.folderId) await assertFolderAccess(opts.folderId, ownerId);
-    return db.file.findMany({
-      where: { ownerId, folderId: opts.folderId ?? null, trashedAt: null, status: "READY" },
-      orderBy: order,
-    });
+    return page({ ownerId, folderId: opts.folderId ?? null, trashedAt: null, status: "READY" });
   }
   if (opts.view === "recent") {
-    return db.file.findMany({
-      where: { ownerId, trashedAt: null, status: "READY" },
-      orderBy: { updatedAt: "desc" },
-      take: 50,
-    });
+    // Recent is a peek, not a listing — keep it capped small.
+    return page({ ownerId, trashedAt: null, status: "READY" }, 50);
   }
   if (opts.view === "starred") {
-    return db.file.findMany({
-      where: { ownerId, trashedAt: null, starred: true, status: "READY" },
-      orderBy: order,
-    });
+    return page({ ownerId, trashedAt: null, starred: true, status: "READY" });
   }
   if (opts.view === "trash") {
-    return db.file.findMany({
-      where: { ownerId, trashedAt: { not: null } },
-      orderBy: { trashedAt: "desc" },
-    });
+    return page({ ownerId, trashedAt: { not: null } });
   }
   // search
   const q = (opts.q ?? "").trim().toLowerCase();
-  return db.file.findMany({
-    where: {
-      ownerId,
-      trashedAt: null,
-      status: "READY",
-      ...(q ? { normalizedName: { contains: q } } : {}),
-    },
-    orderBy: order,
-    take: 200,
+  return page({
+    ownerId,
+    trashedAt: null,
+    status: "READY",
+    ...(q ? { normalizedName: { contains: q } } : {}),
   });
 }
 
@@ -394,8 +424,21 @@ export async function purgeFile(ownerId: string, fileId: string): Promise<void> 
   audit("file.purge", ownerId, file.id, file.name);
 }
 
-export async function emptyTrash(ownerId: string): Promise<{ purged: number; failed: number; errors: string[] }> {
-  const files = await db.file.findMany({ where: { ownerId, trashedAt: { not: null } } });
+/**
+ * Permanently empty the trash: purge every trashed file, then every trashed
+ * folder (deepest-first). Partial failures are reported, never silent — rows
+ * that fail stay in the trash for retry.
+ */
+export async function emptyTrash(ownerId: string): Promise<{
+  purged: number;
+  foldersPurged: number;
+  failed: number;
+  errors: string[];
+}> {
+  const files = await db.file.findMany({
+    where: { ownerId, trashedAt: { not: null } },
+    select: { id: true, name: true },
+  });
   let purged = 0;
   let failed = 0;
   const errors: string[] = [];
@@ -408,7 +451,34 @@ export async function emptyTrash(ownerId: string): Promise<{ purged: number; fai
       errors.push(`${file.name}: ${err instanceof Error ? err.message : String(err)}`);
     }
   }
-  return { purged, failed, errors: errors.slice(0, 10) };
+
+  // Trashed folders (deepest-first so children go before parents).
+  const trashedFolders = await db.folder.findMany({
+    where: { ownerId, trashedAt: { not: null } },
+    select: { id: true, name: true, parentId: true },
+  });
+  const byId = new Map(trashedFolders.map((f) => [f.id, f]));
+  const depth = (id: string): number => {
+    let d = 0;
+    let cur = byId.get(id);
+    while (cur?.parentId && d < config.maxFolderDepth) {
+      cur = byId.get(cur.parentId);
+      d++;
+    }
+    return d;
+  };
+  let foldersPurged = 0;
+  const ordered = [...trashedFolders].sort((a, b) => depth(b.id) - depth(a.id));
+  for (const folder of ordered) {
+    try {
+      await purgeFolder(ownerId, folder.id);
+      foldersPurged++;
+    } catch (err) {
+      failed++;
+      errors.push(`${folder.name}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+  return { purged, foldersPurged, failed, errors: errors.slice(0, 10) };
 }
 
 // --------------------------------------------------------------------------
@@ -551,15 +621,119 @@ export async function purgeFolder(ownerId: string, folderId: string): Promise<{ 
 }
 
 // --------------------------------------------------------------------------
+// Bulk operations (multi-select)
+// --------------------------------------------------------------------------
+
+export type BulkFileAction = "trash" | "restore" | "purge" | "star" | "unstar" | "move";
+export type BulkFolderAction = "trash" | "restore" | "purge";
+
+export interface BulkResult {
+  succeeded: number;
+  failed: number;
+  errors: { id: string; error: string }[];
+}
+
+const BULK_MAX_IDS = 200;
+
+/** Per-item best-effort bulk executor — one bad row never blocks the rest. */
+export async function bulkFileAction(
+  ownerId: string,
+  action: BulkFileAction,
+  ids: string[],
+  folderId?: string | null,
+): Promise<BulkResult> {
+  const unique = [...new Set(ids)].slice(0, BULK_MAX_IDS);
+  const result: BulkResult = { succeeded: 0, failed: 0, errors: [] };
+  for (const id of unique) {
+    try {
+      switch (action) {
+        case "trash":
+          await trashFile(ownerId, id);
+          break;
+        case "restore":
+          await restoreFile(ownerId, id);
+          break;
+        case "purge":
+          await purgeFile(ownerId, id);
+          break;
+        case "star":
+          await setStar(ownerId, id, true);
+          break;
+        case "unstar":
+          await setStar(ownerId, id, false);
+          break;
+        case "move":
+          await moveFile(ownerId, id, folderId ?? null);
+          break;
+      }
+      result.succeeded++;
+    } catch (err) {
+      result.failed++;
+      result.errors.push({ id, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  return result;
+}
+
+export async function bulkFolderAction(
+  ownerId: string,
+  action: BulkFolderAction,
+  ids: string[],
+): Promise<BulkResult> {
+  const unique = [...new Set(ids)].slice(0, BULK_MAX_IDS);
+  const result: BulkResult = { succeeded: 0, failed: 0, errors: [] };
+
+  // Restores run shallowest-first: restoring a parent covers its subtree, and
+  // "restore the parent folder first" 409s are avoided by construction.
+  let ordered = unique;
+  if (action === "restore") {
+    const folders = await db.folder.findMany({
+      where: { id: { in: unique }, ownerId },
+      select: { id: true, parentId: true },
+    });
+    const parentIdOf = new Map(folders.map((f) => [f.id, f.parentId]));
+    const depth = (id: string): number => {
+      let d = 0;
+      let cur = parentIdOf.get(id);
+      while (cur && d < config.maxFolderDepth) {
+        cur = parentIdOf.get(cur);
+        d++;
+      }
+      return d;
+    };
+    ordered = [...unique].sort((a, b) => depth(a) - depth(b));
+  }
+
+  for (const id of ordered) {
+    try {
+      if (action === "trash") await trashFolder(ownerId, id);
+      else if (action === "restore") await restoreFolder(ownerId, id);
+      else await purgeFolder(ownerId, id);
+      result.succeeded++;
+    } catch (err) {
+      result.failed++;
+      result.errors.push({ id, error: err instanceof Error ? err.message : String(err) });
+    }
+  }
+  return result;
+}
+
+// --------------------------------------------------------------------------
 // Download + stats
 // --------------------------------------------------------------------------
 
-export async function getFileForDownload(ownerId: string, fileId: string): Promise<File> {
+export async function getFileForDownload(
+  ownerId: string,
+  fileId: string,
+  opts?: { audit?: boolean },
+): Promise<File> {
   const file = await assertFileAccess(fileId, ownerId);
   if (file.status !== "READY") throw new ServiceError("File is not ready", 409);
   if (file.trashedAt) throw new ServiceError("File is in the trash", 409);
   if (!file.tgFileId) throw new ServiceError("Stored file reference missing", 500);
-  audit("file.download", ownerId, file.id, file.name);
+  // Inline previews / grid thumbnails would flood the activity feed and the
+  // audit table — only real (attachment) downloads are audited.
+  if (opts?.audit !== false) audit("file.download", ownerId, file.id, file.name);
   return file;
 }
 
@@ -595,12 +769,13 @@ export async function repairFileReferences(
 }
 
 export async function stats(ownerId: string) {
-  const [fileCount, sizeAgg, folderCount, starred, trashed, failedJobs] = await Promise.all([
+  const [fileCount, sizeAgg, folderCount, starred, trashed, trashedBytes, failedJobs] = await Promise.all([
     db.file.count({ where: { ownerId, trashedAt: null, status: "READY" } }),
     db.file.aggregate({ where: { ownerId, trashedAt: null, status: "READY" }, _sum: { size: true } }),
     db.folder.count({ where: { ownerId, trashedAt: null } }),
     db.file.count({ where: { ownerId, trashedAt: null, starred: true } }),
     db.file.count({ where: { ownerId, trashedAt: { not: null } } }),
+    db.file.aggregate({ where: { ownerId, trashedAt: { not: null } }, _sum: { size: true } }),
     db.uploadJob.count({ where: { userId: ownerId, status: "FAILED" } }),
   ]);
   return {
@@ -609,6 +784,67 @@ export async function stats(ownerId: string) {
     folders: folderCount,
     starred,
     trash: trashed,
+    trashBytes: trashedBytes._sum.size ?? 0,
     failedUploads: failedJobs,
   };
+}
+
+// --------------------------------------------------------------------------
+// Storage dashboard overview
+// --------------------------------------------------------------------------
+
+export interface TypeBucket {
+  kind: string; // display label
+  files: number;
+  bytes: number;
+}
+
+/** Bucket a mime type into a coarse, user-facing family label. */
+export function bucketMime(mimeType: string): string {
+  const mime = (mimeType || "").toLowerCase();
+  if (mime.startsWith("image/")) return "Images";
+  if (mime.startsWith("video/")) return "Videos";
+  if (mime.startsWith("audio/")) return "Audio";
+  if (mime === "application/pdf") return "PDFs";
+  if (/(zip|gzip|rar|7z|tar|compress)/.test(mime)) return "Archives";
+  if (/(msword|officedocument|opendocument|rtf)/.test(mime)) return "Documents";
+  if (/(json|xml|javascript|typescript|x-sh)/.test(mime)) return "Code & data";
+  if (mime.startsWith("text/")) return "Text";
+  return "Other";
+}
+
+/**
+ * Everything the dashboard needs in one round-trip. All numbers are EXACT
+ * measurements of the metadata index — no invented capacity or quotas (the
+ * Bot API exposes nothing about Telegram-side storage limits).
+ */
+export async function storageOverview(ownerId: string) {
+  const [base, byMime, recent, activeShares] = await Promise.all([
+    stats(ownerId),
+    db.file.groupBy({
+      by: ["mimeType"],
+      where: { ownerId, trashedAt: null, status: "READY" },
+      _count: { mimeType: true },
+      _sum: { size: true },
+    }),
+    db.auditEvent.findMany({
+      where: { userId: ownerId },
+      orderBy: { createdAt: "desc" },
+      take: 15,
+      select: { action: true, detail: true, target: true, createdAt: true },
+    }),
+    db.shareLink.count({ where: { createdBy: ownerId, revokedAt: null } }),
+  ]);
+
+  const buckets = new Map<string, TypeBucket>();
+  for (const row of byMime) {
+    const kind = bucketMime(row.mimeType);
+    const cur = buckets.get(kind) ?? { kind, files: 0, bytes: 0 };
+    cur.files += row._count.mimeType;
+    cur.bytes += row._sum.size ?? 0;
+    buckets.set(kind, cur);
+  }
+  const byType = [...buckets.values()].sort((a, b) => b.bytes - a.bytes || b.files - a.files);
+
+  return { ...base, byType, recent, activeShares };
 }

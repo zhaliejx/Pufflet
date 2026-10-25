@@ -64,3 +64,5 @@ server.log
 /examples/
 *.tsbuildinfo
 .botapi-sim/
+tool-results
+prisma/db
