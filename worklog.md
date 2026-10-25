@@ -184,3 +184,25 @@ Stage Summary:
 - Root cause was NEVER the user's env values — Bot API 10.3 removed --logverbosity, which the entrypoint still passed
 - User action: Render will auto-deploy 9641c5c (or Manual Deploy); expect "using embedded Local Bot API (limits: 2000 MB up / 2000 MB down)" then Ready; Settings should show local (2000 MB)
 - Incident trail: effect module fix -> oversized api_id -> --logverbosity removal; entrypoint now guards all three classes (closure deps, bad env shapes, unknown-flag crash visibility)
+---
+Task ID: 19
+Agent: main (Z.ai)
+Task: Add vault — at-rest encryption + obfuscation for every file stored in the Telegram channel; transparent decrypt on download
+
+Work Log:
+- Explored pipeline: uploads streamed via storeUploadStream -> sendDocument; download routes DID NOT EXIST (getFileForDownload/contentDisposition dead code; UI store.ts already called /api/files/{id}/download; docs/API.md documented /api/v1/files/{id}/download)
+- New src/lib/vault.ts: PUFFENC1 container = magic(8)|ver(1)|nonce(12)|padLen u32(4)|AES-256-GCM payload|tag(16), full header as GCM AAD; plaintext payload = 0-64KiB random pad || file (pad inside ciphertext hides sizes); streaming both ways with constant memory (tag-at-end handled by withholding last 16 bytes until flush); obfuscatedStorageName() = pf-<24hex>.bin; mime to TG always octet-stream
+- Key custody: PUFFLET_ENCRYPTION_KEY -> scrypt(passphrase,"pufflet-vault-v1",32) never stored; else random 32B key in new Setting model (race-safe upsert + re-read), cached in globalThis, markStateDirty() so the key is snapshotted immediately
+- Prisma: +Setting model (sqlite + postgres twins); deploy path already runs prisma db push on boot
+- state-backup: SNAPSHOT_VERSION=2 with settings[] (carries vault key through self-heal); parse accepts v1 (settings=[]) for pre-vault pinned snapshots — user's existing Render snapshot restores fine
+- files.ts storeUploadStream: encodeUploadStream() before sendDocument; DB size = vault plaintext counter (exact), mime = job.mimeType; sha256 still computed on plaintext pre-vault
+- New routes: GET /api/files/[id]/download (session) + GET /api/v1/files/[id]/download (read scope) — peek magic: container -> decrypt+de-pad, legacy -> verbatim passthrough (no key lookup); original name/mime/size headers; ?inline=1 supported
+- config: PUFFLET_ENCRYPTION (default on; "false" disables NEW-file encryption only, decode always available) + PUFFLET_ENCRYPTION_KEY
+- telegram-mock bug: multipart parser decoded binary as UTF-8 then mixed string/byte indices -> ~5% truncation of random ciphertext (vault correctly failed closed); fixed with latin1 byte-domain parsing; e2e now includes a REAL download roundtrip for the first time
+- .gitignore bug: unanchored download/ rule was hiding the new route dirs from git (deploy would have shipped without them); anchored /download/ /upload/ /examples/
+- Validation: unit 56/56 (20 new vault cases: round-trip sizes 0B-1MB, 1-byte/odd chunk stress, tamper/truncate/wrong-key fail-closed, legacy passthrough, name/pad properties, service-layer integration with fake storage chat); e2e 37/37 via mock Bot API + real dev server (upload -> ciphertext in mock chat -> transparent decrypt byte-identical; snapshot v2 pins); lint clean; tsc no new errors (fixed DecipherGCM/setAuthTag/Buffer generics + snapshot version narrowing + storeUploadStream opts optional)
+- Committed 633b9db, pushed main (token in push URL only)
+
+Stage Summary:
+- Everything in the storage chat is now ciphertext under opaque names: AES-256-GCM (AAD-protected header, random 0-64KiB padding), original name/mime/size only in the DB; downloads decrypt transparently; pre-vault files keep working untouched
+- User actions: Render auto-deploys 633b9db (db push adds Setting table; next snapshot flush becomes v2 with the vault key). Optional hardening: add PUFFLET_ENCRYPTION_KEY=<long random passphrase> in Render env — key then lives ONLY in env (never in DB/snapshot); losing it loses vault files, so store it safely. Legacy files (uploaded before) download fine as-is; new uploads encrypted from the first one
