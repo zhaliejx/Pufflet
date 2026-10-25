@@ -149,3 +149,20 @@ Work Log:
 Stage Summary:
 - Boot path can no longer stall ~80s or silently point at a dead embedded server; every boot logs its storage mode
 - User actions: fix/clean TELEGRAM_API_ID+HASH values (or switch to TELEGRAM_API_BASE-only mode), redeploy 92da261; if it still fails, send the [pufflet] log lines
+
+---
+Task ID: 17
+Agent: main (Z.ai)
+Task: User provided real api_id (34203910) + api_hash (32-hex); harden entrypoint pre-flight checks; produce Render env-table copy-paste block
+
+Work Log:
+- Confirmed root cause of "embedded telegram-bot-api exited immediately" from official source: --api-id parsed via to_integer_safe<int32> -> values > 2147483647 (e.g. bot-token prefix 8768064067) print usage and exit; empty api_hash also exits ("You must provide valid api-id and api-hash")
+- User's new values validated by shape: 34203910 numeric + in int32 range, hash is 32 hex chars -> embedded mode will boot this time
+- entrypoint.sh: pre-flight targeted checks (non-numeric / out-of-int32-range with "that's the BOT id not api_id" hint / hash not 32-hex with actual length echoed); bot-api stdout+stderr now captured to $BOT_API_DIR/bot-api.log and last 20 lines echoed with [bot-api] prefix on instant exit; mkdir -p work dir tmp subdir; fixed leftover case ;;/esac + missing fi from restructure (caught by sh -n)
+- scripts/test-entrypoint.sh: 8 cases now (quotes, bot-token-prefix 8768064067, zero, bot-token-as-hash, instant-death w/ captured output, healthy embedded, external, hosted) — all pass
+- README Option B2: where to get api_id/api_hash (my.telegram.org -> API development tools, phone login), bot-token-prefix pitfall, one-time hosted logOut via browser URL https://api.telegram.org/bot<TOKEN>/logOut before/while deploying (up to 10 min to take effect)
+- lint clean, 36/36 unit tests; committed f647f80, pushed main (token in push URL only)
+
+Stage Summary:
+- User's Render env table should contain exactly: TELEGRAM_API_ID=34203910, TELEGRAM_API_HASH=<32-hex>, TELEGRAM_BOT_TOKEN, TELEGRAM_CHAT_ID — and must DELETE TELEGRAM_API_BASE (Render proxy) or embedded limits/auto-config get bypassed
+- Critical pending step for user: one-time hosted logOut (bot still logged into hosted API) or local-server Telegram calls will 409/fail; old hosted file_ids die after logOut
