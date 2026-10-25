@@ -59,7 +59,7 @@ db/*.db-journal
 dev.log
 server.log
 .zscripts/
-download/
-upload/
-examples/
+/download/
+/upload/
+/examples/
 *.tsbuildinfo

@@ -14,6 +14,7 @@ const SAMPLE: SnapshotData = {
   version: SNAPSHOT_VERSION,
   exportedAt: "2026-01-01T00:00:00.000Z",
   counts: { users: 1, folders: 2, files: 1, apiKeys: 1 },
+  settings: [{ key: "vault.masterKey", value: "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY" }],
   users: [
     {
       id: "u1",
@@ -109,6 +110,7 @@ function fakeTx() {
       file: model("file"),
       folder: model("folder"),
       user: model("user"),
+      setting: model("setting"),
     } as never,
   };
 }
@@ -120,6 +122,15 @@ describe("snapshot serialize/parse", () => {
   });
   test("rejects unknown versions", () => {
     expect(() => parseSnapshot(JSON.stringify({ ...SAMPLE, version: 99 }))).toThrow(/version/i);
+    expect(() => parseSnapshot(JSON.stringify({ ...SAMPLE, version: 3 }))).toThrow(/version/i);
+  });
+  test("accepts legacy v1 snapshots (pre-vault) with no settings", () => {
+    const legacy = JSON.parse(JSON.stringify(SAMPLE)) as Record<string, unknown>;
+    legacy.version = 1;
+    delete legacy.settings;
+    const parsed = parseSnapshot(JSON.stringify(legacy));
+    expect(parsed.version).toBe(1);
+    expect(parsed.settings).toEqual([]);
   });
   test("rejects garbage", () => {
     expect(() => parseSnapshot("not json")).toThrow();
@@ -163,6 +174,11 @@ describe("applySnapshotData", () => {
     expect((fileCreate!.args as { data: { id: string; tgFileId: string } }).data.tgFileId).toBe("TGFILE");
     const keyCreate = calls.find((c) => c.model === "apiKey" && c.op === "create");
     expect((keyCreate!.args as { data: { id: string; hash: string } }).data.hash).toBe("deadbeef");
+
+    // settings (incl. the vault key) wiped then restored verbatim
+    expect(calls.some((c) => c.model === "setting" && c.op === "deleteMany")).toBe(true);
+    const settingCreate = calls.find((c) => c.model === "setting" && c.op === "create");
+    expect((settingCreate!.args as { data: { key: string; value: string } }).data.key).toBe("vault.masterKey");
 
     // dates revived as Date objects
     expect(((userCreate!.args as { data: { createdAt: unknown } }).data.createdAt) instanceof Date).toBe(true);

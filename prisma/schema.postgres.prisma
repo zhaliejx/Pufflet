@@ -137,3 +137,9 @@ model AuditEvent {
 
   @@index([createdAt])
 }
+
+model Setting {
+  key       String   @id // e.g. "vault.masterKey" (base64 of the 256-bit vault key)
+  value     String
+  updatedAt DateTime @updatedAt
+}

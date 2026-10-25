@@ -40,6 +40,21 @@ export const config = {
   stateBackupEnabled: process.env.STATE_BACKUP !== "false",
   stateBackupIntervalMs: intEnv("STATE_BACKUP_INTERVAL_MS", 60_000),
 
+  // Vault (at-rest encryption for files in the storage chat) ------------------
+  // Every uploaded file is wrapped in an AES-256-GCM container BEFORE it is
+  // sent to Telegram, under an opaque name, and decrypted transparently on
+  // download. Disable new-file encryption with PUFFLET_ENCRYPTION="false"
+  // (existing vault containers still decrypt regardless of this flag).
+  // Key custody:
+  //   - PUFFLET_ENCRYPTION_KEY set  -> key derived from that passphrase and
+  //     NEVER stored in the DB or the snapshot (you are responsible for
+  //     keeping it; losing it makes every vault file undecryptable).
+  //   - unset (default)             -> a random 256-bit key is generated on
+  //     first upload and kept in the Setting table; it rides inside the
+  //     state-backup snapshot so self-heal restores stay decryptable.
+  encryptionEnabled: process.env.PUFFLET_ENCRYPTION !== "false",
+  encryptionPassphrase: process.env.PUFFLET_ENCRYPTION_KEY ?? "",
+
   // API tokens ---------------------------------------------------------------
   apiKeyPrefix: "tc_live_",
 

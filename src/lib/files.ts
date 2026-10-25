@@ -8,6 +8,7 @@ import { config } from "@/lib/config";
 import { sanitizeName } from "@/lib/folder-utils";
 import { telegram } from "@/lib/telegram";
 import { audit } from "@/lib/audit";
+import { encodeUploadStream, obfuscatedStorageName } from "@/lib/vault";
 import { Folder, File } from "@prisma/client";
 
 export class ServiceError extends Error {
@@ -231,12 +232,17 @@ export async function getUploadJob(ownerId: string, jobId: string) {
  * record the File row. Telegram + the DB cannot share a transaction, so the
  * design is: Telegram first; DB success row last; failures leave the job in
  * FAILED with no phantom File. Re-PUT on a FAILED job is allowed (retry).
+ *
+ * Vault: the stream is encrypted + padded before a single byte leaves the
+ * server, and Telegram receives an opaque "pf-<hex>.bin" name with a generic
+ * content type. The real name / mime / size live only in this DB; downloads
+ * decrypt transparently (see /download routes).
  */
 export async function storeUploadStream(
   ownerId: string,
   jobId: string,
   body: ReadableStream<Uint8Array>,
-  opts: { hashStream?: (s: ReadableStream<Uint8Array>) => { stream: ReadableStream<Uint8Array>; digest: () => string } },
+  opts?: { hashStream?: (s: ReadableStream<Uint8Array>) => { stream: ReadableStream<Uint8Array>; digest: () => string } },
 ): Promise<File> {
   const job = await getUploadJob(ownerId, jobId);
   if (job.status === "READY" && job.fileId) {
@@ -252,12 +258,17 @@ export async function storeUploadStream(
   if (opts?.hashStream) {
     const h = opts.hashStream(stream);
     stream = h.stream;
-    digest = h.digest;
+    digest = h.digest; // hashes PLAINTEXT bytes (pre-vault) — verifiable checksums
   }
 
   try {
     await db.uploadJob.update({ where: { id: job.id }, data: { status: "STORING" } });
-    const stored = await telegram().sendDocument(job.filename, job.mimeType ?? "application/octet-stream", stream);
+    const encoded = await encodeUploadStream(stream);
+    const stored = await telegram().sendDocument(
+      obfuscatedStorageName(),
+      "application/octet-stream", // never leak the real mime type to Telegram
+      encoded.stream,
+    );
 
     const finalName = await uniqueFileName(ownerId, job.folderId, job.filename);
     const file = await db.$transaction(async (tx) => {
@@ -265,8 +276,10 @@ export async function storeUploadStream(
         data: {
           name: finalName,
           normalizedName: normalizeName(finalName),
-          size: stored.size || job.size,
-          mimeType: stored.mimeType || job.mimeType || "application/octet-stream",
+          // plaintext size (counted by the vault) wins; Telegram's reported
+          // size is inflated by the padding + container overhead
+          size: encoded.plaintextBytes?.() || job.size || stored.size,
+          mimeType: job.mimeType ?? stored.mimeType ?? "application/octet-stream",
           status: "READY",
           ownerId,
           folderId: job.folderId,

@@ -17,12 +17,17 @@ Browser ──HTTPS──> Pufflet (Next.js) ──Bot API──> your private T
                  metadata DB (Prisma: files, folders, users, API keys, audit)
 ```
 
-- **Telegram stores the bytes.** Every upload is streamed through the server into a
-  private channel via `sendDocument`; Pufflet records the chat id, message id,
-  bot-scoped `file_id`, and `file_unique_id` in the database.
+- **Telegram stores the bytes — encrypted.** Every upload is wrapped in an
+  AES-256-GCM vault container (with random padding and an opaque filename)
+  before it is streamed through the server into a private channel via
+  `sendDocument`; Pufflet records the chat id, message id, bot-scoped
+  `file_id`, and `file_unique_id` in the database. The channel holds
+  ciphertext only — no names, no extensions, no recognizable headers.
 - **The database stores the truth about your files** (names, sizes, folder tree,
   trash state, checksums, Telegram references). Backing up the DB backs up your
-  *index* — the file contents live in your Telegram channel.
+  *index* — the file contents live in your Telegram channel. On download the
+  vault container is detected and decrypted transparently; files uploaded
+  before the vault existed stream through untouched.
 - **Secrets stay server-side.** The bot token is never sent to the browser;
   downloads stream through an authenticated route instead of exposing Telegram URLs.
 
@@ -37,6 +42,10 @@ Browser ──HTTPS──> Pufflet (Next.js) ──Bot API──> your private T
 - 📁 Nested folders with breadcrumbs, rename/move, **circular-nesting protection**
 - 📤 Streaming uploads (create-job → PUT raw bytes) with real progress, cancel,
   retry-able failure state, duplicate-name de-duplication, SHA-256 checksums
+- 🔒 **Vault: encrypted + obfuscated storage** — files are AES-256-GCM encrypted,
+  randomly padded, and stored under opaque names (`pf-….bin`) in your channel;
+  downloads decrypt transparently with the original filename (legacy files keep
+  working untouched)
 - 📥 Authenticated streaming downloads with safe `Content-Disposition` headers
 - ⭐ Starred, 🕘 Recent, 🗑️ Trash with restore + permanent delete + empty trash
   (trash keeps the Telegram message until permanent deletion)
@@ -396,6 +405,44 @@ chat**:
   Postgres already persists). Interval is `STATE_BACKUP_INTERVAL_MS`
   (default 60 s). Status + manual "Back up now": Settings → Data safety.
 
+### Vault — at-rest encryption & obfuscation
+
+Everything Pufflet sends to your storage chat is ciphertext: before a single
+byte leaves the server, the file is wrapped in a **`PUFFENC1` container** —
+`magic ‖ version ‖ 12-byte nonce ‖ padded AES-256-GCM payload ‖ 16-byte tag`,
+with the whole header acting as GCM associated data (tamper → decrypt fails).
+Obfuscation rides on top:
+
+- **Opaque names** — uploads are stored as `pf-<24 hex>.bin`; the real filename
+  and extension never reach Telegram, they live only in the metadata DB.
+- **Generic content type** — Telegram always sees `application/octet-stream`.
+- **Random padding** — 0–64 KiB of encrypted size noise, so message sizes don't
+  reveal the exact size distribution of your files.
+
+Downloads (`/api/files/{id}/download` and `/api/v1/files/{id}/download`) detect
+the magic and decrypt transparently, serving the original bytes under the
+original name. Files uploaded before the vault existed (no magic) pass through
+untouched — no migration needed.
+
+**Key custody** (choose one):
+
+| Mode | How | Trade-off |
+|------|-----|-----------|
+| Passphrase (recommended) | set `PUFFLET_ENCRYPTION_KEY` → key derived via scrypt, never stored | Key exists only on the server env; lose the passphrase and vault files are gone |
+| Auto (default) | unset → a random 256-bit key is generated on first upload and kept in the `Setting` table | Zero setup; the key rides inside the state-backup snapshot, so self-heal restores stay decryptable (the snapshot must stay private) |
+
+Notes:
+
+- This is **server-side at-rest encryption, not end-to-end**: the Pufflet
+  process holds the key precisely so it can decrypt downloads for you. Anyone
+  who controls the server (or reads both the DB and the chat) can decrypt.
+  For hostile-host scenarios, encrypt archives client-side before uploading.
+- Turn new-file encryption off with `PUFFLET_ENCRYPTION="false"` — existing
+  vault containers still decrypt regardless of the flag.
+- Changing `PUFFLET_ENCRYPTION_KEY` (or wiping the `Setting` row in auto mode)
+  makes previously encrypted files undecryptable. The SHA-256 checksums are
+  computed on plaintext, so you can always verify a download's integrity.
+
 ### Any host (bare Node/Bun)
 
 - Build with `npm run build && npm run start` (or run `bun run dev` behind a
@@ -418,6 +465,8 @@ chat**:
 - Passwords: scrypt (N=16384) with per-user salt, constant-time verification
 - API tokens: 32 random bytes (256-bit), shown once, SHA-256 hashed at rest,
   scope + expiry + revocation enforced per request, `lastUsedAt` tracking
+- Vault: AES-256-GCM containers with AAD-protected headers, 0–64 KiB random
+  padding, opaque storage names; plaintext never leaves the server
 - Raw tokens, stack traces, Telegram payloads, and DB errors never reach clients
 
 ## Repository layout

@@ -35,7 +35,7 @@ Authorization: Bearer tc_live_xxxxxxxxxxxxxxxx
 | DELETE | `/api/v1/files/{id}` | delete | Move to trash |
 | DELETE | `/api/v1/files/{id}?permanent=1` | delete | **Irreversibly** delete (Telegram message too) |
 | POST | `/api/v1/files/{id}?action=restore` | write | Restore from trash |
-| GET | `/api/v1/files/{id}/download` | read | Stream the file |
+| GET | `/api/v1/files/{id}/download` | read | Stream the file (vault containers are decrypted transparently) |
 | GET | `/api/v1/folders` | read | List folders (`all=1` includes trashed) |
 | POST | `/api/v1/folders` | write | Create folder |
 | PATCH | `/api/v1/folders/{id}` | write | Rename (`{name}`) or move (`{parentId}`) |
@@ -84,6 +84,11 @@ curl -sL "https://your-pufflet/api/v1/files/$FILE_ID/download" \
 ```
 
 Streams through the server; the bot token never appears in any URL handed out.
+The response carries the original filename, mime type and byte size. If the file
+was stored by the vault (all uploads are, by default), the AES-256-GCM container
+is decrypted and de-padded transparently — you always receive the original bytes.
+Files uploaded before the vault existed are served verbatim. Add `?inline=1` to
+serve inline (browser preview) instead of a forced download.
 
 ## Folder tree rules
 

@@ -25,7 +25,8 @@ import { config, isTelegramConfigured } from "@/lib/config";
 import { telegram } from "@/lib/telegram";
 import type { Prisma } from "@prisma/client";
 
-export const SNAPSHOT_VERSION = 1;
+export const SNAPSHOT_VERSION = 2;
+export const LEGACY_SNAPSHOT_VERSIONS = [1] as const; // still restorable (pre-vault snapshots)
 export const STATE_BACKUP_MARKER = "pufflet-state-backup.json";
 const MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024; // safety cap while restoring
 
@@ -88,6 +89,13 @@ export interface SnapshotApiKey {
   createdAt: string;
 }
 
+/** Generic key/value rows — carries the vault master key so a self-healed
+ *  database can still decrypt vault containers. */
+export interface SnapshotSetting {
+  key: string;
+  value: string;
+}
+
 export interface SnapshotData {
   version: number;
   exportedAt: string;
@@ -96,6 +104,8 @@ export interface SnapshotData {
   folders: SnapshotFolder[];
   files: SnapshotFile[];
   apiKeys: SnapshotApiKey[];
+  /** v2+. v1 snapshots have no settings (empty array after parse). */
+  settings: SnapshotSetting[];
 }
 
 // --------------------------------------------------------------------------
@@ -112,14 +122,17 @@ export function serializeSnapshot(data: SnapshotData): string {
 export function parseSnapshot(text: string): SnapshotData {
   const raw = JSON.parse(text) as Partial<SnapshotData> | null;
   if (!raw || typeof raw !== "object") throw new Error("Snapshot is not an object");
-  if (raw.version !== SNAPSHOT_VERSION) {
-    throw new Error(`Unsupported snapshot version: ${String(raw.version)}`);
+  const version = raw.version as number;
+  const isCurrent = version === SNAPSHOT_VERSION;
+  const isLegacy = (LEGACY_SNAPSHOT_VERSIONS as readonly number[]).includes(version);
+  if (!isCurrent && !isLegacy) {
+    throw new Error(`Unsupported snapshot version: ${String(version)}`);
   }
   for (const key of ["users", "folders", "files", "apiKeys"] as const) {
     if (!Array.isArray(raw[key])) throw new Error(`Snapshot field "${key}" is missing`);
   }
   return {
-    version: raw.version,
+    version,
     exportedAt: typeof raw.exportedAt === "string" ? raw.exportedAt : new Date().toISOString(),
     counts: raw.counts ?? {
       users: raw.users!.length,
@@ -131,6 +144,10 @@ export function parseSnapshot(text: string): SnapshotData {
     folders: raw.folders as SnapshotFolder[],
     files: raw.files as SnapshotFile[],
     apiKeys: raw.apiKeys as SnapshotApiKey[],
+    // v1 snapshots predate the vault / Setting table: no key material in them.
+    // A fresh key is generated on the first post-restore upload, and the next
+    // flush persists it as v2.
+    settings: isCurrent && Array.isArray(raw.settings) ? (raw.settings as SnapshotSetting[]) : [],
   };
 }
 
@@ -149,6 +166,7 @@ export async function applySnapshotData(tx: Prisma.TransactionClient, data: Snap
   await tx.folder.updateMany({ data: { parentId: null } });
   await tx.folder.deleteMany({});
   await tx.user.deleteMany({});
+  await tx.setting.deleteMany({});
 
   for (const u of data.users) {
     await tx.user.create({
@@ -224,6 +242,12 @@ export async function applySnapshotData(tx: Prisma.TransactionClient, data: Snap
       },
     });
   }
+
+  // Settings last (v2+): includes the vault master key. Restoring it is what
+  // keeps files uploaded under that key decryptable after a self-heal.
+  for (const s of data.settings ?? []) {
+    await tx.setting.create({ data: { key: s.key, value: s.value } });
+  }
 }
 
 // --------------------------------------------------------------------------
@@ -293,11 +317,12 @@ async function readStreamCapped(stream: ReadableStream<Uint8Array>, cap: number)
 }
 
 async function buildSnapshotData(): Promise<SnapshotData> {
-  const [users, folders, files, apiKeys] = await Promise.all([
+  const [users, folders, files, apiKeys, settings] = await Promise.all([
     db.user.findMany({ orderBy: { createdAt: "asc" } }),
     db.folder.findMany({ orderBy: { createdAt: "asc" } }),
     db.file.findMany({ orderBy: { createdAt: "asc" } }),
     db.apiKey.findMany({ orderBy: { createdAt: "asc" } }),
+    db.setting.findMany({ orderBy: { key: "asc" } }),
   ]);
   const data: SnapshotData = {
     version: SNAPSHOT_VERSION,
@@ -354,6 +379,7 @@ async function buildSnapshotData(): Promise<SnapshotData> {
       revokedAt: iso(k.revokedAt),
       createdAt: iso(k.createdAt)!,
     })),
+    settings: settings.map((s) => ({ key: s.key, value: s.value })),
   };
   return data;
 }
@@ -461,7 +487,8 @@ export async function restoreIfEmpty(): Promise<{ restored: boolean; reason?: st
   await db.$transaction((tx) => applySnapshotData(tx, data), { timeout: 60_000 });
   console.log(
     `[state-backup] restored snapshot (exported ${data.exportedAt}): ` +
-      `${data.counts.users} user(s), ${data.counts.folders} folder(s), ${data.counts.files} file(s), ${data.counts.apiKeys} API key(s)`,
+      `${data.counts.users} user(s), ${data.counts.folders} folder(s), ${data.counts.files} file(s), ${data.counts.apiKeys} API key(s)` +
+      (data.settings.length ? `, ${data.settings.length} setting(s) incl. vault key` : ""),
   );
   return { restored: true };
 }

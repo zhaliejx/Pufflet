@@ -52,7 +52,11 @@ async function readAll(stream: ReadableStream<Uint8Array>): Promise<Uint8Array> 
 }
 
 function parseMultipart(body: Uint8Array, boundary: string, partName = "document") {
-  const text = new TextDecoder().decode(body);
+  // IMPORTANT: all index math must stay in the BYTE domain. Decoding binary
+  // bodies as UTF-8 collapses invalid sequences (U+FFFD) and shifts string
+  // indices vs byte offsets — ciphertext payloads would get truncated. latin1
+  // ("binary") is a 1:1 byte<->char map, so string indexes == byte offsets.
+  const text = Buffer.from(body).toString("latin1");
   // find the file part: content-disposition with filename=
   const nameMatch = new RegExp(`name="${partName}"; filename="([^"]+)"`).exec(text);
   const typeMatch = /Content-Type: ([^\r\n]+)/.exec(text.slice(text.indexOf(nameMatch?.[1] ?? "document")));
