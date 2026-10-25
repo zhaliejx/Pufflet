@@ -95,3 +95,21 @@ Work Log:
 - README: constraints table generalized (self-hosted server anywhere, not just bundled); Option A rewritten as "Vercel + your own Bot API server" (Render setup via aiogram/telegram-bot-api image + --local command, mandatory tg:logout step, env table with TELEGRAM_API_BASE + MAX_UPLOAD_MB=4 + MAX_DOWNLOAD_MB=2000, keep-awake pinger note, bandwidth budgets, security note); Option B now flagged as the free path for 2000 MB uploads; known-limitations bullet updated
 - .env.example: remote self-hosted TELEGRAM_API_BASE example; docker-compose.yml: fixed stale "Option A" README reference
 - lint clean, 36/36 unit tests pass; committed + pushed (token used in push URL only, remote kept clean)
+
+---
+Task ID: 14
+Agent: main (Z.ai)
+Task: User pivots to "set this up on HF space (static)" — HF Spaces deployment path (2GB uploads, no Vercel)
+
+Work Log:
+- Clarified: HF "Static" SDK only serves fixed HTML — Pufflet needs the Docker SDK (free); documented in README Option B
+- Probed user's bot (token provided in chat): @Pufflet_bot, still HOSTED-logged-in; their Render service (telegram-bot-api-cylx.onrender.com) answers getMe AND getUpdates identically to hosted — impossible for a real local bot-api (which locks the bot exclusively) -> it's a passthrough/proxy with hosted's 50/20MB limits, not 2000MB
+- Built scripts/deploy_hf.mjs (zero-dep Node): whoami-v2 verification (write role enforced), auto-discovery of storage chat via hosted getUpdates + getChatMember admin validation, Space creation via /api/repos/create (409 tolerated), code push via git clone + git archive HEAD (tracked files only — .env/db never leave machine), HF front-matter README (sdk: docker, app_port: 7860), 4 secrets via /api/spaces/{id}/secrets, optional --logout (one-time hosted logOut, gated), build polling (15s interval, 15min window, terminal-stage detection)
+- Tested: node --check, usage path, fake-token rejection (clean 401 before any mutation); real run pending user's HF token
+- README: Option B now has wizard tip + one-command example; repository layout lists the script
+- Committed & pushed (eb40c53); bot NOT logged out yet — script does it with --logout at deploy time (bot idle, safe either way)
+
+Stage Summary:
+- User can deploy by pasting an HF write token (I run the script) or running it themselves
+- Pending from user: HF write token, api_id/api_hash, (chat id auto-discovered if a message was posted in the channel recently)
+- After Space is live: delete/suspend the Render proxy service (no longer needed)
