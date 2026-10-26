@@ -30,7 +30,15 @@ export type AuditAction =
   | "key.create"
   | "key.revoke"
   | "backup.flush"
-  | "backup.restore";
+  | "backup.restore"
+  | "rclone.remote_create"
+  | "rclone.remote_update"
+  | "rclone.remote_delete"
+  | "rclone.remote_test"
+  | "rclone.send"
+  | "rclone.ingest"
+  | "rclone.sync_start"
+  | "rclone.sync_cancel";
 
 // Actions that change data covered by the state snapshot (users, folders,
 // files, API keys). Sessions/audit rows are transient and not snapshotted.

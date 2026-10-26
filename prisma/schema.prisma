@@ -28,6 +28,8 @@ model User {
   uploadJobs  UploadJob[]
   apiKeys     ApiKey[]
   auditEvents AuditEvent[]
+  rcloneRemotes RcloneRemote[]
+  rcloneJobs    RcloneJob[]
 }
 
 model Session {
@@ -160,4 +162,54 @@ model Setting {
   key       String   @id // e.g. "vault.masterKey" (base64 of the 256-bit vault key)
   value     String
   updatedAt DateTime @updatedAt
+}
+
+// rclone remotes — user-configured external storage backends (S3, Google
+// Drive, SFTP, ...). Provider options (including secrets) are stored as an
+// AES-256-GCM encrypted JSON blob in configEnc; they NEVER leave the server
+// in API responses (only masked summaries are returned).
+model RcloneRemote {
+  id            String    @id @default(cuid())
+  ownerId       String
+  owner         User      @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  name          String    @unique // rclone remote name, [a-z0-9-] only
+  type          String // backend type: s3, gdrive, sftp, local, ...
+  configEnc     String // encrypted JSON of provider options (never plaintext)
+  status        String    @default("unknown") // unknown | ok | error
+  lastError     String? // sanitized message from the last connectivity check
+  lastCheckedAt DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  jobs RcloneJob[]
+
+  @@index([ownerId])
+}
+
+// Background rclone sync jobs: push (Pufflet folder -> remote) and pull
+// (remote -> Pufflet folder). Progress lives on the row so clients poll it
+// like any upload job.
+model RcloneJob {
+  id         String       @id @default(cuid())
+  userId     String
+  user       User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  remoteId   String
+  remote     RcloneRemote @relation(fields: [remoteId], references: [id], onDelete: Cascade)
+  kind       String // push | pull
+  remotePath String // root path on the remote ("" = remote root)
+  folderId   String? // Pufflet folder root (push source / pull target)
+  status     String       @default("QUEUED") // QUEUED | RUNNING | DONE | FAILED | CANCELED
+  totalFiles Int          @default(0)
+  doneFiles  Int          @default(0)
+  skipped    Int          @default(0) // skipped (too large / invalid name)
+  failed     Int          @default(0) // per-file failures (job continues)
+  bytes      BigInt       @default(0) // cumulative transferred bytes
+  lastError  String? // most recent per-file error (sanitized)
+  startedAt  DateTime?
+  finishedAt DateTime?
+  createdAt  DateTime     @default(now())
+  updatedAt  DateTime     @updatedAt
+
+  @@index([userId, status])
+  @@index([remoteId])
 }

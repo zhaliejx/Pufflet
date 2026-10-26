@@ -61,6 +61,18 @@ export const config = {
   // Uploads ------------------------------------------------------------------
   maxFilenameLength: 180,
   maxFolderDepth: 20,
+
+  // rclone integration ---------------------------------------------------------
+  // Bridges Pufflet to external storage backends (S3, Google Drive, SFTP, ...)
+  // by driving the `rclone` binary. Disable the whole feature with
+  // PUFFLET_RCLONE="false". Remote credentials live encrypted in the DB and
+  // are materialized ONLY into a 0600 temp config file for each invocation.
+  rcloneEnabled: process.env.PUFFLET_RCLONE !== "false",
+  rclonePath: process.env.PUFFLET_RCLONE_PATH ?? "rclone", // binary path or custom shim
+  rcloneTimeoutMs: intEnv("PUFFLET_RCLONE_TIMEOUT_MS", 120_000), // metadata ops (lsjson/mkdir/version)
+  rcloneTransferTimeoutMs: intEnv("PUFFLET_RCLONE_TRANSFER_TIMEOUT_MS", 30 * 60_000), // cat/rcat streams
+  rcloneMaxBrowseEntries: intEnv("PUFFLET_RCLONE_BROWSE_LIMIT", 1000),
+  rcloneMaxSyncFiles: intEnv("PUFFLET_RCLONE_SYNC_MAX_FILES", 2000), // per sync job
 } as const;
 
 export const MAX_UPLOAD_BYTES = config.maxUploadMb * 1024 * 1024;
