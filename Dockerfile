@@ -53,8 +53,9 @@ FROM aiogram/telegram-bot-api:10.3 AS botapi
 # ---- runtime ----------------------------------------------------------------
 FROM node:22-alpine AS runner
 WORKDIR /app
-# openssl: Prisma engines; libstdc++: telegram-bot-api binary
-RUN apk add --no-cache openssl libstdc++
+# openssl: Prisma engines; libstdc++: telegram-bot-api binary; rclone: the
+# external-storage bridge (Settings -> rclone Storage)
+RUN apk add --no-cache openssl libstdc++ rclone
 ENV NODE_ENV=production \
     HOSTNAME=0.0.0.0 \
     PORT=7860

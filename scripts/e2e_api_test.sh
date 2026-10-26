@@ -425,6 +425,160 @@ curl -s -X DELETE "$BASE/api/folders/$EBID" -b "$COOKIE" >/dev/null
 code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$BASE/api/folders/$EBID?permanent=1" -b "$COOKIE")
 check "cleanup: purge e2e_up_b" "$code" "200"
 
+say "== 19. rclone storage integration (mock binary) =="
+# Requires the server to run with PUFFLET_RCLONE_PATH=<repo>/scripts/rclone-mock.mjs
+# and RCLONE_MOCK_STATE pointing at a scratch directory. The mock materializes
+# uploads/downloads as plain files, so every round trip can be byte-compared.
+if [ "${PUFFLET_RCLONE_E2E:-}" != "1" ] || [ ! -x "${PUFFLET_RCLONE_PATH:-}" ]; then
+  say "  skip: start the server with PUFFLET_RCLONE_PATH=scripts/rclone-mock.mjs and PUFFLET_RCLONE_E2E=1 to run this section"
+else
+  RCSTATE="${RCLONE_MOCK_STATE:?RCLONE_MOCK_STATE must point at the mock state dir}"
+  rm -rf "$RCSTATE"
+  mkdir -p "$RCSTATE"
+
+  code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/rclone/remotes")
+  check "rclone remotes require session (401)" "$code" "401"
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/rclone/remotes" -H 'content-type: application/json' -d '{"name":"x","type":"local"}')
+  check "rclone remote create requires session (401)" "$code" "401"
+  code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/v1/rclone/remotes")
+  check "v1 rclone remotes require token (401)" "$code" "401"
+
+  ST=$(curl -s "$BASE/api/rclone/status" -b "$COOKIE")
+  contains "rclone binary detected (mock version)" "$ST" 'v1.99.0-mock'
+
+  CR=$(curl -s -X POST "$BASE/api/rclone/remotes" -b "$COOKIE" -H 'content-type: application/json' -d '{"name":"e2e-remote","type":"local","config":{}}')
+  contains "remote created" "$CR" '"name":"e2e-remote"'
+  RID=$(echo "$CR" | sed 's/.*"id":"\([^"]*\)".*/\1/')
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/rclone/remotes" -b "$COOKIE" -H 'content-type: application/json' -d '{"name":"e2e-remote","type":"local","config":{}}')
+  check "duplicate remote name rejected (409)" "$code" "409"
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/rclone/remotes" -b "$COOKIE" -H 'content-type: application/json' -d '{"name":"Bad_Name","type":"local","config":{}}')
+  check "invalid remote name rejected (400)" "$code" "400"
+
+  TT=$(curl -s -X POST "$BASE/api/rclone/remotes/$RID/test" -b "$COOKIE")
+  contains "connectivity test passes" "$TT" '"ok":true'
+  BR=$(curl -s "$BASE/api/rclone/remotes/$RID/browse?path=" -b "$COOKIE")
+  contains "empty remote lists zero entries" "$BR" '"entries":[]'
+
+  # send: Pufflet -> remote (rcat), byte-compared against the mock state dir
+  printf 'rclone e2e payload %s' "$RANDOM" > "$T/rc-src.txt"
+  RCF=$(upload "$COOKIE" "rc-src.txt" "$T/rc-src.txt")
+  RCFID=$(echo "$RCF" | sed 's/.*"id":"\([^"]*\)".*/\1/')
+  SND=$(curl -s --max-time 60 -X POST "$BASE/api/rclone/remotes/$RID/send" -b "$COOKIE" -H 'content-type: application/json' -d "{\"fileId\":\"$RCFID\",\"targetPath\":\"e2e_rclone/hello.txt\"}")
+  contains "send streams file to remote path" "$SND" '"path":"e2e_rclone/hello.txt"'
+  if diff -q "$T/rc-src.txt" "$RCSTATE/e2e_rclone/hello.txt" >/dev/null 2>&1; then
+    PASS_COUNT=$((PASS_COUNT+1)); say "  ok: rcat bytes identical on the remote"
+  else
+    FAIL_COUNT=$((FAIL_COUNT+1)); say "  FAIL: rcat bytes differ on the remote"
+  fi
+  BR2=$(curl -s "$BASE/api/rclone/remotes/$RID/browse?path=e2e_rclone" -b "$COOKIE")
+  contains "browse shows the sent file with its size" "$BR2" '"name":"hello.txt"'
+
+  # download: remote -> browser proxy stream, byte-compared
+  curl -s --max-time 60 -o "$T/rc-dl.txt" "$BASE/api/rclone/remotes/$RID/download?path=e2e_rclone%2Fhello.txt" -b "$COOKIE"
+  if diff -q "$T/rc-src.txt" "$T/rc-dl.txt" >/dev/null 2>&1; then
+    PASS_COUNT=$((PASS_COUNT+1)); say "  ok: remote download bytes identical"
+  else
+    FAIL_COUNT=$((FAIL_COUNT+1)); say "  FAIL: remote download bytes differ"
+  fi
+
+  # ingest: remote -> Pufflet (full round trip back through the vault)
+  ING=$(curl -s --max-time 60 -X POST "$BASE/api/rclone/remotes/$RID/ingest" -b "$COOKIE" -H 'content-type: application/json' -d '{"path":"e2e_rclone/hello.txt"}')
+  contains "ingest returns the created file" "$ING" '"fileId":"'
+  INGID=$(echo "$ING" | sed 's/.*"fileId":"\([^"]*\)".*/\1/')
+  curl -s -o "$T/rc-rt.txt" "$BASE/api/files/$INGID/download" -b "$COOKIE"
+  if diff -q "$T/rc-src.txt" "$T/rc-rt.txt" >/dev/null 2>&1; then
+    PASS_COUNT=$((PASS_COUNT+1)); say "  ok: full Pufflet->remote->Pufflet round trip is byte-perfect"
+  else
+    FAIL_COUNT=$((FAIL_COUNT+1)); say "  FAIL: ingest round trip bytes differ"
+  fi
+
+  # secrets never come back
+  SEC="s3cr3t-$RANDOM-$RANDOM"
+  SR=$(curl -s -X POST "$BASE/api/rclone/remotes" -b "$COOKIE" -H 'content-type: application/json' -d "{\"name\":\"e2e-secret\",\"type\":\"s3\",\"config\":{\"region\":\"eu-west-1\",\"access_key_id\":\"AKIAE2E\",\"secret_access_key\":\"$SEC\"}}")
+  contains "s3 remote created" "$SR" '"name":"e2e-secret"'
+  SRID=$(echo "$SR" | sed 's/.*"id":"\([^"]*\)".*/\1/')
+  ALLR=$(curl -s "$BASE/api/rclone/remotes" -b "$COOKIE")
+  ALLR2=$(curl -s "$BASE/api/v1/rclone/remotes" -H "Authorization: Bearer $TOK")
+  if echo "$ALLR$ALLR2" | grep -q "$SEC"; then
+    FAIL_COUNT=$((FAIL_COUNT+1)); say "  FAIL: secret value leaked in a listing response"
+  else
+    PASS_COUNT=$((PASS_COUNT+1)); say "  ok: secret value absent from every listing"
+  fi
+  SRUP=$(curl -s -X PATCH "$BASE/api/rclone/remotes/$SRID" -b "$COOKIE" -H 'content-type: application/json' -d '{"config":{"secret_access_key":""}}')
+  contains "empty secret on update keeps stored value (no error)" "$SRUP" '"name":"e2e-secret"'
+  curl -s -X DELETE "$BASE/api/rclone/remotes/$SRID" -b "$COOKIE" >/dev/null
+
+  # folder sync push: Pufflet tree -> remote
+  ES=$(curl -s -X POST "$BASE/api/folders/ensure-paths" -b "$COOKIE" -H 'content-type: application/json' -d '{"paths":["rclone_sync_src","rclone_sync_src/sub"]}')
+  SRCID=$(echo "$ES" | sed 's/.*"rclone_sync_src":"\([^"]*\)".*/\1/')
+  printf 'sync file A %s' "$RANDOM" > "$T/sync-a.txt"
+  printf 'sync file B %s' "$RANDOM" > "$T/sync-b.txt"
+  SA=$(upload "$COOKIE" "sync-a.txt" "$T/sync-a.txt"); SAID=$(echo "$SA" | sed 's/.*"id":"\([^"]*\)".*/\1/')
+  curl -s -X PATCH "$BASE/api/files/$SAID" -b "$COOKIE" -H 'content-type: application/json' -d "{\"folderId\":\"$SRCID\"}" >/dev/null
+  SB=$(upload "$COOKIE" "sync-b.txt" "$T/sync-b.txt"); SBID=$(echo "$SB" | sed 's/.*"id":"\([^"]*\)".*/\1/')
+  SUBID=$(echo "$ES" | sed 's/.*"rclone_sync_src\/sub":"\([^"]*\)".*/\1/')
+  curl -s -X PATCH "$BASE/api/files/$SBID" -b "$COOKIE" -H 'content-type: application/json' -d "{\"folderId\":\"$SUBID\"}" >/dev/null
+  PJ=$(curl -s -X POST "$BASE/api/rclone/sync" -b "$COOKIE" -H 'content-type: application/json' -d "{\"remoteId\":\"$RID\",\"kind\":\"push\",\"remotePath\":\"sync-target\",\"folderId\":\"$SRCID\"}")
+  contains "push job queued" "$PJ" '"status":"QUEUED"'
+  PJID=$(echo "$PJ" | sed 's/.*"id":"\([^"]*\)".*/\1/')
+  PSTAT="QUEUED"
+  for _ in $(seq 1 40); do
+    PSTAT=$(curl -s "$BASE/api/rclone/jobs/$PJID" -b "$COOKIE" | sed 's/.*"status":"\([A-Z]*\)".*/\1/')
+    case "$PSTAT" in QUEUED|RUNNING) sleep 0.5;; *) break;; esac
+  done
+  check "push job finished" "$PSTAT" "DONE"
+  if diff -q "$T/sync-a.txt" "$RCSTATE/sync-target/sync-a.txt" >/dev/null 2>&1 && diff -q "$T/sync-b.txt" "$RCSTATE/sync-target/sub/sync-b.txt" >/dev/null 2>&1; then
+    PASS_COUNT=$((PASS_COUNT+1)); say "  ok: push mirrored the folder structure byte-perfect"
+  else
+    FAIL_COUNT=$((FAIL_COUNT+1)); say "  FAIL: push output missing or differs"
+  fi
+
+  # folder sync pull: remote -> a fresh Pufflet folder
+  ED=$(curl -s -X POST "$BASE/api/folders/ensure-paths" -b "$COOKIE" -H 'content-type: application/json' -d '{"paths":["rclone_sync_dst"]}')
+  DSTID=$(echo "$ED" | sed 's/.*"rclone_sync_dst":"\([^"]*\)".*/\1/')
+  LJ=$(curl -s -X POST "$BASE/api/rclone/sync" -b "$COOKIE" -H 'content-type: application/json' -d "{\"remoteId\":\"$RID\",\"kind\":\"pull\",\"remotePath\":\"sync-target\",\"folderId\":\"$DSTID\"}")
+  LJID=$(echo "$LJ" | sed 's/.*"id":"\([^"]*\)".*/\1/')
+  LSTAT="QUEUED"
+  for _ in $(seq 1 40); do
+    LSTAT=$(curl -s "$BASE/api/rclone/jobs/$LJID" -b "$COOKIE" | sed 's/.*"status":"\([A-Z]*\)".*/\1/')
+    case "$LSTAT" in QUEUED|RUNNING) sleep 0.5;; *) break;; esac
+  done
+  check "pull job finished" "$LSTAT" "DONE"
+  SUB2=$(curl -s "$BASE/api/folders?all=1" -b "$COOKIE" | python3 -c "import json,sys; d=json.load(sys.stdin); print(next(f['id'] for f in d['folders'] if f['name']=='sub' and f['parentId']=='$DSTID'))" 2>/dev/null)
+  if [ -n "$SUB2" ]; then
+    contains "pull imported the nested file" "$(curl -s "$BASE/api/files?view=folder&folderId=$SUB2" -b "$COOKIE")" 'sync-b.txt'
+  else
+    FAIL_COUNT=$((FAIL_COUNT+1)); say "  FAIL: pull did not mirror the sub folder"
+  fi
+
+  # v1 scope enforcement + admin-scope mirror
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/v1/rclone/remotes" -H "Authorization: Bearer $TOK" -H 'content-type: application/json' -d '{"name":"v1-remote","type":"local","config":{}}')
+  check "v1 remote create requires admin scope (403)" "$code" "403"
+  AK=$(curl -s -X POST "$BASE/api/keys" -b "$COOKIE" "${XFF[@]}" -H 'content-type: application/json' -d '{"name":"rclone-admin","scopes":["admin"]}')
+  ATOK=$(echo "$AK" | sed 's/.*"token":"\([^"]*\)".*/\1/')
+  V1C=$(curl -s -X POST "$BASE/api/v1/rclone/remotes" -H "Authorization: Bearer $ATOK" -H 'content-type: application/json' -d '{"name":"v1-remote","type":"local","config":{}}')
+  contains "v1 remote create with admin scope works" "$V1C" '"name":"v1-remote"'
+  V1RID=$(echo "$V1C" | sed 's/.*"id":"\([^"]*\)".*/\1/')
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$BASE/api/v1/rclone/remotes/$V1RID" -H "Authorization: Bearer $ATOK")
+  check "v1 remote delete with admin scope works (200)" "$code" "200"
+  curl -s -X DELETE "$BASE/api/keys/$(echo "$AK" | sed 's/.*"id":"\([^"]*\)".*/\1/')" -b "$COOKIE" >/dev/null
+
+  # delete remote: 404 afterwards
+  code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$BASE/api/rclone/remotes/$RID" -b "$COOKIE")
+  check "remote deleted (200)" "$code" "200"
+  code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/rclone/remotes/$RID/browse?path=" -b "$COOKIE")
+  check "browse after delete is 404" "$code" "404"
+
+  # cleanup: purge sync folders + mock state
+  curl -s -X DELETE "$BASE/api/folders/$SRCID" -b "$COOKIE" >/dev/null
+  curl -s -X DELETE "$BASE/api/folders/$SRCID?permanent=1" -b "$COOKIE" >/dev/null
+  curl -s -X DELETE "$BASE/api/folders/$DSTID" -b "$COOKIE" >/dev/null
+  curl -s -X DELETE "$BASE/api/folders/$DSTID?permanent=1" -b "$COOKIE" >/dev/null
+  curl -s -X DELETE "$BASE/api/files/$RCFID?permanent=1" -b "$COOKIE" >/dev/null
+  curl -s -X DELETE "$BASE/api/files/$INGID?permanent=1" -b "$COOKIE" >/dev/null
+  rm -rf "$RCSTATE"
+fi
+
 say ""
 say "==================================="
 say "PASS: $PASS_COUNT   FAIL: $FAIL_COUNT"

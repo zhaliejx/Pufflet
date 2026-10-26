@@ -47,6 +47,11 @@ Browser ──HTTPS──> Pufflet (Next.js) ──Bot API──> your private T
   downloads it first. Handles the virus-scan interstitial automatically, gives
   actionable errors for private/deleted files, folders, and Docs links (see
   [Import from Google Drive](#import-from-google-drive))
+- 🗄️ **rclone Storage** — configure rclone remotes (S3, Google Drive, SFTP,
+  WebDAV, Dropbox, OneDrive, Azure, B2, local disk), browse them, pull files
+  into Pufflet, push files/folders out, and run folder syncs — credentials are
+  AES-256-GCM encrypted server-side and never returned by the API (see
+  [rclone Storage](#rclone-storage))
 - 🔗 **Public share links** — share any file with a no-login URL (`/s/<token>`),
   with a branded download page, optional inline preview for images/video/PDF,
   download counters, revocation, optional expiry, and per-IP rate limiting
@@ -596,6 +601,43 @@ exactly.
   (drag & drop can), and cloud placeholders (Google Drive files picked via the
   system file manager) still arrive as 0-byte stubs — those are skipped with
   the “import via From Google Drive” hint as usual.
+
+### rclone Storage
+
+Pufflet can bridge any [rclone](https://rclone.org)-supported backend into the
+app — configure remotes in **Settings → rclone Storage**, then browse, import,
+push, and sync:
+
+- **Configure** — name a remote, pick a backend, fill its fields. Supported
+  curated backends: `s3` (AWS + compatible: MinIO, R2, B2 S3), `gdrive`,
+  `sftp`, `webdav`, `dropbox`, `onedrive`, `azureblob`, `b2`, and `local`
+  (the server's own filesystem). OAuth backends (Drive, Dropbox, OneDrive)
+  take a token JSON produced by `rclone authorize "<backend>"` on your own
+  machine — no OAuth flow runs on the server.
+- **Credential safety** — provider options (secret keys, tokens, passwords)
+  are stored as one AES-256-GCM encrypted blob per remote, bound to the row id
+  via the GCM AAD. They are materialized ONLY into a private 0600 temp config
+  file for each rclone invocation and shredded afterwards; API responses
+  return masked values only. With `PUFFLET_ENCRYPTION_KEY` set, the config key
+  is derived from that passphrase instead of the database.
+- **Browse** — navigate a remote's folders, download a file straight to your
+  device (proxied through the server), or **Import** it into Pufflet
+  (rclone cat → vault → Telegram, the same encrypted pipeline as uploads).
+- **Send** — any file's row menu has *Send to rclone…* to stream it from
+  Pufflet's encrypted storage out to a remote (`rclone rcat`; no temp files).
+- **Sync** — folder-level jobs: *Push* copies a Pufflet folder tree to the
+  remote (mirrors structure, overwrites same-name files, deletes nothing);
+  *Pull* imports a remote tree into a Pufflet folder (find-or-create folders,
+  skips files over the upload limit). Jobs run one at a time, show live
+  progress, and can be canceled.
+- **Scopes** — the REST API mirrors everything: remotes are `admin` scope
+  (they hold credentials), browsing/reading is `read`, transfers and syncs are
+  `write`. See [docs/API.md](docs/API.md).
+
+Requires the `rclone` binary on the server (the Docker image installs it;
+elsewhere set `PUFFLET_RCLONE_PATH`). Disable the whole feature with
+`PUFFLET_RCLONE="false"`. The `local` backend exposes the server filesystem —
+only add it if you trust every account on the instance.
 
 ### Any host (bare Node/Bun)
 

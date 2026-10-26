@@ -82,6 +82,18 @@ privately by the browser for 1 hour; attachment downloads are `no-store`.
 | GET | `/api/v1/keys` | admin | List API keys |
 | POST | `/api/v1/keys` | admin | Create an API key |
 | DELETE | `/api/v1/keys/{id}` | admin | Revoke an API key |
+| GET | `/api/v1/rclone/remotes` | read | List rclone remotes (secrets masked) |
+| POST | `/api/v1/rclone/remotes` | admin | Configure a remote (`{name, type, config}`) |
+| PATCH | `/api/v1/rclone/remotes/{id}` | admin | Update/rename a remote (empty secret = keep stored) |
+| DELETE | `/api/v1/rclone/remotes/{id}` | admin | Forget a remote (destroys its encrypted credentials) |
+| GET | `/api/v1/rclone/remotes/{id}/browse?path=` | read | List a remote directory (`{entries:[{path,name,size,isDir,…}]}`) |
+| GET | `/api/v1/rclone/remotes/{id}/download?path=` | read | Proxy-stream a remote file |
+| POST | `/api/v1/rclone/remotes/{id}/send` | write | Stream a Pufflet file to the remote (`{fileId, targetPath}`) |
+| POST | `/api/v1/rclone/remotes/{id}/ingest` | write | Pull a remote file into Pufflet (`{path, folderId?}`) |
+| POST | `/api/v1/rclone/sync` | write | Start a folder sync job (`{remoteId, kind:"push"\|"pull", remotePath, folderId}`) |
+| GET | `/api/v1/rclone/jobs` | read | Recent sync jobs with live progress |
+| GET | `/api/v1/rclone/jobs/{id}` | read | Poll one job |
+| POST | `/api/v1/rclone/jobs/{id}/cancel` | write | Abort a queued/running job |
 
 Website-only endpoints (session cookie, not tokens): `/api/stats`,
 `/api/overview`, `/api/shares`, `/api/backup*`, `/api/trash/empty`, `/api/auth/*`,
@@ -242,6 +254,13 @@ limits, so none is invented.
 |---|---|---|
 | 400 | `BAD_FILENAME` | Invalid/overlong filename (≤180 chars, no path tricks) |
 | 400 | `BAD_SIZE` | Missing/invalid `size` on job creation |
+| 400 | `BAD_REMOTE_NAME` / `BAD_REMOTE_TYPE` / `BAD_REMOTE_CONFIG` / `BAD_REMOTE_PATH` | rclone remote validation (name charset, backend, fields, path) |
+| 400 | `INCOMPLETE_CONFIG` | A required remote credential field is missing |
+| 400 | `TOO_MANY` | Sync job exceeds the per-job file cap |
+| 409 | `REMOTE_EXISTS` / `SYNC_ACTIVE` | Duplicate remote name / another sync is already running |
+| 409 | `REMOTE_DECRYPT` | Stored remote credentials failed decryption — re-save the remote |
+| 502 | `RCLONE_FAILED` / `REMOTE_AUTH` / `REMOTE_NOT_FOUND` | rclone-side failure mapped from stderr |
+| 503 | `RCLONE_MISSING` | The rclone binary is unavailable (or PUFFLET_RCLONE=false) |
 | 400 | `CYCLE` | Folder move into its own subtree |
 | 401 | — | Missing/invalid token, or revoked/expired key |
 | 403 | — | Token lacks the required scope |
