@@ -305,3 +305,22 @@ Work Log:
 Stage Summary:
 - Listing payloads −56% with bounded pages, 304-cached previews, instant back/forward navigation, and a UI that stops re-rendering on every progress tick; uploads are queued/retryable/deduped; multi-select + bulk actions + keyboard shortcuts; dashboard with exact measured numbers (no invented capacity); share links gain expiry UI + owner-wide management; trash finally shows folders and empty-trash covers them; backup snapshot/restore hardened against races, truncation, and torn reads — all verified by 78 unit + 77 e2e checks including a real restore round-trip
 - User action: push to origin/main (below) → Render auto-deploys; no schema changes, no migrations, no API contract breaks (files list responses gained a `total` field additively)
+
+---
+Task ID: 24
+Agent: main (Z.ai)
+Task: Pufflet new feature — Direct Google Drive → Pufflet upload; also fix the Android "My Drive" file-picker error path
+
+Work Log:
+- Reviewed existing upload pipeline (createUploadJob → storeUploadStream → vault → Telegram) and client store/queue/dock before writing any code
+- NEW src/lib/gdrive.ts: parseDriveLink (file/d, open?id, uc?id, usercontent, raw ids; folder + Docs/Sheets/Slides + non-Drive + scheme rejections with actionable messages), driveDownloadUrl (drive.usercontent.google.com + confirm=t; PUFFLET_GDRIVE_BASE test hook), fetchDriveFile (streaming, HTML interstitial handling, extractConfirmForm rebuilds the scan-warning form URL, describeDrivePage maps sign-in/404-robot/quota pages, Content-Disposition RFC5987 parser, MIME→ext fallback name)
+- NEW src/lib/remote-import.ts: startRemoteImport (Drive headers → size guard → createUploadJob → background storeUploadStream with uploaderLabel "gdrive"), abort registry wired into DELETE /api/uploads/[id], 15-min hard timeout via AbortSignal.any, 30-min stale-job sweep into FAILED
+- NEW POST /api/uploads/remote (session auth, 20/min rate limit): probe=true resolves metadata only; full call returns uploadId immediately (client polls job row like any upload)
+- files.ts: storeUploadStream honors opts.uploaderLabel; canceled-check before the final DB write; catch no longer overwrites CANCELED with FAILED (benefits device uploads too)
+- UI: Upload button → dropdown (Upload from device / From Google Drive…), new gdrive-dialog.tsx (probe validation with inline errors, Drive SVG icon, sharing requirement copy), store gains uploadFromUrl + remote queue branch + job polling (1.5s, 5-miss watchdog) + stopPolling on cancel/dismiss, dock shows "resolving Drive link…" / "fetching from Google Drive…", uploadFiles now rejects 0-byte picks and .gdoc/.gsheet/.gslides shortcuts with fix-it toasts (the Android "My Drive" picker symptom — browser hands over an empty File)
+- telegram-mock: fake /fake-gdrive/ (seed/download/confirmed with public|scan|private modes) so e2e runs without internet
+- VALIDATION: bun test 108/108 (30 new); eslint clean; tsc 22 = 21 baseline + 1 same-class bun:test (new test file); production build EXIT=0 with /api/uploads/remote in route manifest; e2e 90/90 (14 new: probe name+size, folder/non-Drive/401/private rejections, import READY + name dedup, BYTE-PERFECT Drive→TG→download roundtrip, scan-page auto-follow); live probe against REAL Google endpoints: real quota page → DRIVE_QUOTA, real "Error 404" robot page (HTTP 200) → DRIVE_NOT_FOUND, unreachable-host mapped; agent-browser end-to-end on the standalone: login → dropdown → dialog → folder-link inline error → successful import → dock "20 B · stored" → "from-drive (2).txt" in listing, zero console errors (download/gdrive-import-verified.png)
+- Docs: README feature bullet + "Import from Google Drive" section (incl. why the phone picker fails and the privacy/limits story), .env.example PUFFLET_GDRIVE_BASE hook
+
+Stage Summary:
+- Users can now paste a Google Drive share link and the SERVER pulls the file (Drive → Pufflet → Telegram): no phone-side download, no OAuth, encrypted storage as usual. Committed as 3 commits on local main (ed61c4c + 3 new); PUSH PENDING — no GitHub credentials stored in this environment, need a fresh PAT from the user to push (old token was never persisted, rotation already advised)

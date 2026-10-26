@@ -42,6 +42,11 @@ Browser ──HTTPS──> Pufflet (Next.js) ──Bot API──> your private T
 - 📁 Nested folders with breadcrumbs, rename/move, **circular-nesting protection**
 - 📤 Streaming uploads (create-job → PUT raw bytes) with real progress, cancel,
   retry-able failure state, duplicate-name de-duplication, SHA-256 checksums
+- 🌐 **Import from Google Drive** — paste a Drive share link and the SERVER pulls
+  the file straight from Google (Drive → Pufflet → Telegram): the browser never
+  downloads it first. Handles the virus-scan interstitial automatically, gives
+  actionable errors for private/deleted files, folders, and Docs links (see
+  [Import from Google Drive](#import-from-google-drive))
 - 🔗 **Public share links** — share any file with a no-login URL (`/s/<token>`),
   with a branded download page, optional inline preview for images/video/PDF,
   download counters, revocation, optional expiry, and per-IP rate limiting
@@ -534,6 +539,41 @@ Right-click any file (or open the ⋮ menu) → **Share** to create a public lin
 API (see `docs/API.md`): `POST/GET/DELETE /api/v1/files/{id}/share`, plus the
 public `GET /api/share/{token}` (metadata) and
 `GET /api/share/{token}/download` (bytes).
+
+### Import from Google Drive
+
+**Upload ▾ → From Google Drive…** lets you import a file by pasting its Drive
+share link. The transfer is server-to-server (Drive → Pufflet → Telegram), so
+your phone or laptop never downloads the file first — a 200 MB video costs you
+no mobile data at all.
+
+How it works and what to know:
+
+- The link must be a **regular file** shared as **“Anyone with the link”**
+  (right-click the file in Google Drive → Share → Copy link). Private links get
+  an inline error telling you exactly that; folders, Google Docs/Sheets/Slides
+  links and non-Drive URLs are rejected up front with guidance.
+- The server follows Google's “can't scan this file for viruses” interstitial
+  automatically (no OAuth, no Google API project, no extra setup), streams the
+  bytes through the same vault-encryption pipeline as device uploads, and the
+  new file appears in the uploads dock and listing like any other upload.
+- The normal upload limit applies (`MAX_UPLOAD_MB`, default 50 MB on the hosted
+  Bot API — 2000 MB with the bundled Local Bot API server). Oversized Drive
+  files are rejected with their real size before any bytes are pulled.
+- Imports are tracked as upload jobs, so failures are visible and retryable,
+  cancel works mid-download, and jobs that die with the server are swept into
+  FAILED after 30 minutes instead of hanging forever.
+- **Why not the “My Drive” entry in the phone's file picker?** Android's storage
+  manager can offer cloud files through the system picker, but many browsers
+  hand the web app an EMPTY file (0 bytes) because the content lives in the
+  cloud, not on the device. Pufflet now detects that case and points you to
+  this import flow — which is exactly what the picker was trying to do, minus
+  the phone in the middle.
+- `POST /api/uploads/remote { url, folderId?, probe? }` (web session auth) is
+  the backing endpoint: `probe: true` resolves name/size without downloading.
+- Tests: `PUFFLET_GDRIVE_BASE` can point the downloader at a local fake (the
+  telegram-mock service implements one), which is how the end-to-end suite
+  validates imports — including the scan-warning flow — without internet.
 
 ### Any host (bare Node/Bun)
 
