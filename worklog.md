@@ -357,3 +357,15 @@ Work Log:
 
 Stage Summary:
 - Pufflet now uploads whole folders with structure intact: picker (webkitdirectory) or drag-drop both route every file into a find-or-created folder tree (one server round trip), with per-file progress/retry/cancel unchanged, relPath shown per dock item, empty dropped folders created, and the same primitive exposed to API users via /api/folders/ensure-paths + /api/v1/folders/ensure-paths. No schema changes, no migrations, no existing behavior altered (device dedupe guard only got folder-scoped).
+
+---
+Task ID: 25-b
+Agent: main (Z.ai)
+Task: Push folder-upload commit to origin/main
+
+Work Log:
+- Squashed the environment's UUID auto-commit (1a58e46, worklog-only) into the feature commit for clean history (same repair pattern as Task 23)
+- Pushed via explicit URL with embedded PAT: 402c257..a7791ef main -> main; tracking ref updated, branch in sync
+
+Stage Summary:
+- Folder upload is on origin/main (a7791ef) → Render auto-deploys. Same standing reminder: the PAT shared in chat should be rotated after use.
