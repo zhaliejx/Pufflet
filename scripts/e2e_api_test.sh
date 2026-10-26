@@ -579,6 +579,152 @@ else
   rm -rf "$RCSTATE"
 fi
 
+say "== 20. WebDAV mount (Pufflet as a remote) =="
+# The DAV mount reuses API keys as WebDAV passwords (HTTP Basic); the server
+# itself needs no rclone binary, so the curl-level checks below always run.
+DAVAUTH=(-u "pufflet:$TOK")
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PROPFIND "$BASE/api/dav")
+check "dav PROPFIND without credentials is 401" "$code" "401"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PROPFIND "$BASE/api/dav" -u "pufflet:tc_live_wrongkey123")
+check "dav PROPFIND with a wrong key is 401" "$code" "401"
+OPTS=$(curl -s -i -X OPTIONS "$BASE/api/dav" | tr -d '\r')
+contains "dav OPTIONS advertises class 1" "$OPTS" "dav: 1"
+contains "dav OPTIONS lists the DAV methods" "$OPTS" "PROPFIND, MKCOL, MOVE, COPY"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -X MKCOL "$BASE/api/dav/dav-e2e" "${DAVAUTH[@]}")
+check "MKCOL creates a folder (201)" "$code" "201"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X MKCOL "$BASE/api/dav/dav-e2e" "${DAVAUTH[@]}")
+check "MKCOL on an existing folder is 405" "$code" "405"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X MKCOL "$BASE/api/dav/dav-e2e/sub" "${DAVAUTH[@]}")
+check "MKCOL creates a nested folder (201)" "$code" "201"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X MKCOL "$BASE/api/dav/no-such-parent/x" "${DAVAUTH[@]}")
+check "MKCOL under a missing parent is 409" "$code" "409"
+
+printf 'webdav hello %s\n' "$RANDOM" > "$T/dav-src.txt"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/dav/dav-e2e/hello.txt" "${DAVAUTH[@]}" -H 'content-type: text/plain' --data-binary @"$T/dav-src.txt")
+check "PUT uploads a file (201)" "$code" "201"
+curl -s "$BASE/api/dav/dav-e2e/hello.txt" "${DAVAUTH[@]}" -o "$T/dav-dl.txt"
+if diff -q "$T/dav-src.txt" "$T/dav-dl.txt" >/dev/null 2>&1; then
+  PASS_COUNT=$((PASS_COUNT+1)); say "  ok: DAV GET returns byte-identical content"
+else
+  FAIL_COUNT=$((FAIL_COUNT+1)); say "  FAIL: DAV GET bytes differ"
+fi
+
+printf 'webdav v2 %s\n' "$RANDOM" > "$T/dav-src2.txt"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/dav/dav-e2e/hello.txt" "${DAVAUTH[@]}" -H 'content-type: text/plain' --data-binary @"$T/dav-src2.txt")
+check "PUT over an existing file is 204 (replace semantics)" "$code" "204"
+curl -s "$BASE/api/dav/dav-e2e/hello.txt" "${DAVAUTH[@]}" -o "$T/dav-dl2.txt"
+if diff -q "$T/dav-src2.txt" "$T/dav-dl2.txt" >/dev/null 2>&1; then
+  PASS_COUNT=$((PASS_COUNT+1)); say "  ok: PUT overwrite replaced the content"
+else
+  FAIL_COUNT=$((FAIL_COUNT+1)); say "  FAIL: PUT overwrite content differs"
+fi
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/dav/ghost-parent/x.txt" "${DAVAUTH[@]}" --data-binary 'x')
+check "PUT under a missing parent is 409" "$code" "409"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/dav/dav-e2e/caf%C3%A9%20na%C3%AFve.txt" "${DAVAUTH[@]}" --data-binary 'unicode')
+check "PUT with a UTF-8 name works (201)" "$code" "201"
+PF=$(curl -s -X PROPFIND "$BASE/api/dav/dav-e2e" -H 'Depth: 1' "${DAVAUTH[@]}")
+contains "PROPFIND lists the UTF-8 name decoded" "$PF" 'café naïve'
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PROPFIND "$BASE/api/dav" -H 'Depth: 1' "${DAVAUTH[@]}")
+check "PROPFIND root depth 1 is 207" "$code" "207"
+PFR=$(curl -s -X PROPFIND "$BASE/api/dav" -H 'Depth: 1' "${DAVAUTH[@]}")
+contains "PROPFIND root lists the DAV folder" "$PFR" 'dav-e2e'
+PFI=$(curl -s -X PROPFIND "$BASE/api/dav" -H 'Depth: infinity' "${DAVAUTH[@]}")
+contains "Depth: infinity includes the nested folder" "$PFI" 'sub'
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -X MOVE "$BASE/api/dav/dav-e2e/hello.txt" "${DAVAUTH[@]}" -H "Destination: $BASE/api/dav/dav-e2e/renamed.txt")
+check "MOVE renames a file (201)" "$code" "201"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/dav/dav-e2e/hello.txt" "${DAVAUTH[@]}")
+check "old name is gone after MOVE (404)" "$code" "404"
+curl -s "$BASE/api/dav/dav-e2e/renamed.txt" "${DAVAUTH[@]}" -o "$T/dav-moved.txt"
+if diff -q "$T/dav-src2.txt" "$T/dav-moved.txt" >/dev/null 2>&1; then
+  PASS_COUNT=$((PASS_COUNT+1)); say "  ok: MOVE kept the bytes"
+else
+  FAIL_COUNT=$((FAIL_COUNT+1)); say "  FAIL: MOVE content differs"
+fi
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -X MOVE "$BASE/api/dav/dav-e2e/renamed.txt" "${DAVAUTH[@]}" -H "Destination: $BASE/api/dav/dav-e2e/sub/moved.txt")
+check "MOVE into a subfolder works (201)" "$code" "201"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/dav/dav-e2e/renamed.txt" "${DAVAUTH[@]}")
+check "source gone after cross-folder MOVE (404)" "$code" "404"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -X COPY "$BASE/api/dav/dav-e2e/sub/moved.txt" "${DAVAUTH[@]}" -H "Destination: $BASE/api/dav/dav-e2e/copied.txt")
+check "COPY duplicates a file (201)" "$code" "201"
+curl -s "$BASE/api/dav/dav-e2e/copied.txt" "${DAVAUTH[@]}" -o "$T/dav-copied.txt"
+if diff -q "$T/dav-src2.txt" "$T/dav-copied.txt" >/dev/null 2>&1; then
+  PASS_COUNT=$((PASS_COUNT+1)); say "  ok: COPY duplicated the bytes"
+else
+  FAIL_COUNT=$((FAIL_COUNT+1)); say "  FAIL: COPY content differs"
+fi
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/dav/dav-e2e/sub/moved.txt" "${DAVAUTH[@]}")
+check "COPY left the source intact (200)" "$code" "200"
+
+code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$BASE/api/dav/dav-e2e/copied.txt" "${DAVAUTH[@]}")
+check "DELETE removes a file (204)" "$code" "204"
+code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/dav/dav-e2e/copied.txt" "${DAVAUTH[@]}")
+check "deleted file is gone (404)" "$code" "404"
+
+# scope enforcement: a read-only key can list/download but never mutate
+RK=$(curl -s -X POST "$BASE/api/keys" -b "$COOKIE" "${XFF[@]}" -H 'content-type: application/json' -d '{"name":"dav-readonly","scopes":["read"]}')
+RTOK=$(echo "$RK" | sed 's/.*"token":"\([^"]*\)".*/\1/')
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PUT "$BASE/api/dav/dav-e2e/sub/moved.txt" -u "pufflet:$RTOK" --data-binary 'nope')
+check "read-only key cannot PUT (403)" "$code" "403"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$BASE/api/dav/dav-e2e/sub/moved.txt" -u "pufflet:$RTOK")
+check "read-only key cannot DELETE (403)" "$code" "403"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X PROPFIND "$BASE/api/dav" -H 'Depth: 0' -u "pufflet:$RTOK")
+check "read-only key can PROPFIND (207)" "$code" "207"
+curl -s -X DELETE "$BASE/api/keys/$(echo "$RK" | sed 's/.*"id":"\([^"]*\)".*/\1/')" -b "$COOKIE" >/dev/null
+
+# real-rclone client probe: mount Pufflet AS a webdav remote and drive it
+# with the actual rclone binary (downloaded on demand, skipped offline).
+RLC=""
+if command -v rclone >/dev/null 2>&1; then RLC="$(command -v rclone)"; fi
+if [ -z "$RLC" ] && [ -x /tmp/e2e-rclone/rclone ]; then RLC=/tmp/e2e-rclone/rclone; fi
+if [ -z "$RLC" ]; then
+  say "  -- no local rclone; trying a one-time download for the client probe --"
+  if curl -fsSL --max-time 120 "https://downloads.rclone.org/rclone-current-linux-amd64.zip" -o "$T/rclone.zip" 2>/dev/null; then
+    mkdir -p /tmp/e2e-rclone-dl
+    if python3 -c "import zipfile,sys; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])" "$T/rclone.zip" /tmp/e2e-rclone-dl 2>/dev/null; then
+      RLC=$(ls /tmp/e2e-rclone-dl/rclone-*/rclone 2>/dev/null | head -1)
+      [ -n "$RLC" ] && chmod +x "$RLC"
+    fi
+  fi
+fi
+if [ -z "$RLC" ]; then
+  say "  skip: real-rclone client probe (no binary available)"
+else
+  say "  -- real rclone client probe ($("$RLC" version 2>/dev/null | head -1)) --"
+  OBSCURED=$("$RLC" obscure "$TOK" 2>/dev/null)
+  CONN=":webdav,url=\"${BASE}/api/dav\",vendor=other,user=e2e,pass=${OBSCURED}:"
+  LSF=$("$RLC" lsf "$CONN" --max-depth 1 2>&1)
+  contains "rclone lsf browses Pufflet as a remote" "$LSF" 'dav-e2e/'
+  printf 'rclone client write %s\n' "$RANDOM" > "$T/rc-client.txt"
+  "$RLC" copyto "$T/rc-client.txt" "$CONN"dav-e2e/sub/rclone-client.txt >/dev/null 2>&1
+  curl -s "$BASE/api/dav/dav-e2e/sub/rclone-client.txt" "${DAVAUTH[@]}" -o "$T/rc-client-dl.txt"
+  if diff -q "$T/rc-client.txt" "$T/rc-client-dl.txt" >/dev/null 2>&1; then
+    PASS_COUNT=$((PASS_COUNT+1)); say "  ok: rclone copyto uploads byte-perfect into Pufflet"
+  else
+    FAIL_COUNT=$((FAIL_COUNT+1)); say "  FAIL: rclone copyto upload bytes differ"
+  fi
+  mkdir -p "$T/dav-out"
+  "$RLC" copy "$CONN"dav-e2e/sub "$T/dav-out" >/dev/null 2>&1
+  if diff -q "$T/rc-client.txt" "$T/dav-out/rclone-client.txt" >/dev/null 2>&1; then
+    PASS_COUNT=$((PASS_COUNT+1)); say "  ok: rclone copy downloads byte-perfect from Pufflet"
+  else
+    FAIL_COUNT=$((FAIL_COUNT+1)); say "  FAIL: rclone copy download bytes differ"
+  fi
+  "$RLC" deletefile "$CONN"dav-e2e/sub/rclone-client.txt >/dev/null 2>&1
+  code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/dav/dav-e2e/sub/rclone-client.txt" "${DAVAUTH[@]}")
+  check "rclone deletefile removed the file (404)" "$code" "404"
+fi
+
+# cleanup: DAV DELETE trashes, so purge the e2e folder for real
+curl -s -X DELETE "$BASE/api/dav/dav-e2e" "${DAVAUTH[@]}" >/dev/null
+DEVID=$(curl -s "$BASE/api/folders?all=1" -b "$COOKIE" | python3 -c "import json,sys; d=json.load(sys.stdin); print(next(f['id'] for f in d['folders'] if f['name']=='dav-e2e'))" 2>/dev/null)
+[ -n "$DEVID" ] && curl -s -X DELETE "$BASE/api/folders/$DEVID?permanent=1" -b "$COOKIE" >/dev/null
+
 say ""
 say "==================================="
 say "PASS: $PASS_COUNT   FAIL: $FAIL_COUNT"

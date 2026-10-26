@@ -13,6 +13,7 @@ import { useTheme } from "next-themes";
 import { THEME_OPTIONS, useMounted } from "./theme-provider";
 import { ThemeIcon } from "./theme-toggle";
 import { RcloneCard } from "./rclone-card";
+import { DavCard } from "./dav-card";
 import { toast } from "sonner";
 import {
   BadgeCheck,
@@ -258,6 +259,9 @@ export function SettingsPanel({ user }: Props) {
 
       {/* rclone storage integration */}
       <RcloneCard />
+
+      {/* Pufflet itself as an rclone/WebDAV remote */}
+      <DavCard />
 
       {/* Account / password */}
       <Card className="rounded-2xl">

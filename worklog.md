@@ -392,3 +392,19 @@ Work Log:
 
 Stage Summary:
 - Pufflet can now bridge ANY rclone-supported storage: configure remotes (credentials AES-256-GCM encrypted at rest, row-bound, masked in every response, materialized only into a 0600 temp config per invocation), browse remotes, pull files into the encrypted Telegram pipeline, push files/folders out via streaming rcat, and run cancelable one-at-a-time folder sync jobs with live progress — all mirrored on /api/v1 with read/write/admin scope separation. Verified by 153 unit + 130 e2e checks including byte-perfect Pufflet→remote→Pufflet round trips and a real-rclone live probe; browser-verified UI with zero page errors. Committed on main ONLY as directed — not pushed (Render deploy deliberately not triggered)
+
+---
+Task ID: 27
+Agent: main agent (Z.ai)
+Task: Push the pending rclone commits (862a0f7 backend, 3563f20 UI, 2650771 tests+docs) from local main to origin/main after user supplied a fresh PAT
+
+Work Log:
+- Confirmed state before push: on main, working tree clean, 3 commits ahead; plain `git push origin main` failed (no credentials — environment intentionally stores none); verified no ~/.git-credentials, ~/.netrc, ~/.ssh, gh auth or env tokens
+- Verified remote main still at 010eddf via git ls-remote (push had not happened elsewhere)
+- User supplied a fresh PAT in chat; pushed via explicit URL with embedded token: 010eddf..2650771 main -> main
+- Updated tracking ref (git update-ref refs/remotes/origin/main refs/heads/main); git status shows main in sync with origin/main at 2650771
+- Leak check: git remote -v clean, no credential/token in git config, token never written to any file or the worklog
+- Reminder given to user: revoke/rotate this PAT after push (it transited chat history)
+
+Stage Summary:
+- rclone Storage integration is now on origin/main (2650771) → Render auto-deploys the 3-commit feature (23 routes, dual-provider schema, rclone binary added to Dockerfile). PAT used ephemerally in the push URL only — never stored; rotation advised as with previous tokens

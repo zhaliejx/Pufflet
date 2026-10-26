@@ -52,6 +52,10 @@ Browser ──HTTPS──> Pufflet (Next.js) ──Bot API──> your private T
   into Pufflet, push files/folders out, and run folder syncs — credentials are
   AES-256-GCM encrypted server-side and never returned by the API (see
   [rclone Storage](#rclone-storage))
+- 🌐 **Pufflet as a remote** — the flip side: Pufflet serves its own storage
+  over WebDAV at `/api/dav` so external rclone installations (or any WebDAV
+  client) can mount THIS instance as a remote, using an API key as the WebDAV
+  password (see [Pufflet as a remote (WebDAV)](#pufflet-as-a-remote-webdav))
 - 🔗 **Public share links** — share any file with a no-login URL (`/s/<token>`),
   with a branded download page, optional inline preview for images/video/PDF,
   download counters, revocation, optional expiry, and per-IP rate limiting
@@ -638,6 +642,37 @@ Requires the `rclone` binary on the server (the Docker image installs it;
 elsewhere set `PUFFLET_RCLONE_PATH`). Disable the whole feature with
 `PUFFLET_RCLONE="false"`. The `local` backend exposes the server filesystem —
 only add it if you trust every account on the instance.
+
+### Pufflet as a remote (WebDAV)
+
+The rclone card makes Pufflet a *client* of other remotes; the
+**Pufflet as a remote (WebDAV)** card does the opposite: it serves YOUR Pufflet
+storage over WebDAV at `/api/dav` so **external rclone installations (or any
+WebDAV client) can mount Pufflet itself as a remote** — browse, upload,
+download, `rclone copy`/`sync` straight into the encrypted Telegram pipeline:
+
+```
+rclone config create pufflet webdav \
+  url https://<your-pufflet>/api/dav \
+  vendor other \
+  user pufflet \
+  pass "$(rclone obscure <API-KEY>)"
+```
+
+- **Auth** — HTTP Basic where the **password is an API key** (any username).
+  Scopes map to methods: `read` lists/downloads (PROPFIND/GET/HEAD), `write`
+  uploads/structural changes (PUT/MKCOL/MOVE/COPY), `delete` removes
+  (DELETE — needed for `rclone delete`/`sync` cleanup). Keys stay revocable
+  in Settings → API keys, never stored in plaintext anywhere.
+- **Semantics** — the DAV tree mirrors your folders and READY files. PUT
+  replaces same-name files (the old revision goes to the trash), DELETE is a
+  soft-delete (trash), MOVE/COPY follow RFC 4918 with `Destination` +
+  `Overwrite` headers. Names with spaces and UTF-8 round-trip; 0-byte files
+  are rejected by the storage pipeline.
+- **Honest limits** — WebDAV Class 1 (no locking); no Range/partial reads;
+  server-side COPY re-streams bytes through the vault (size-capped like
+  uploads). Disable the mount entirely with `PUFFLET_DAV="false"` (it then
+  answers 404 on everything).
 
 ### Any host (bare Node/Bun)
 

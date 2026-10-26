@@ -38,7 +38,11 @@ export type AuditAction =
   | "rclone.send"
   | "rclone.ingest"
   | "rclone.sync_start"
-  | "rclone.sync_cancel";
+  | "rclone.sync_cancel"
+  | "dav.put"
+  | "dav.move"
+  | "dav.copy"
+  | "dav.auth_failed";
 
 // Actions that change data covered by the state snapshot (users, folders,
 // files, API keys). Sessions/audit rows are transient and not snapshotted.

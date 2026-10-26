@@ -73,6 +73,14 @@ export const config = {
   rcloneTransferTimeoutMs: intEnv("PUFFLET_RCLONE_TRANSFER_TIMEOUT_MS", 30 * 60_000), // cat/rcat streams
   rcloneMaxBrowseEntries: intEnv("PUFFLET_RCLONE_BROWSE_LIMIT", 1000),
   rcloneMaxSyncFiles: intEnv("PUFFLET_RCLONE_SYNC_MAX_FILES", 2000), // per sync job
+
+  // WebDAV server ("Pufflet as a remote") ------------------------------------
+  // Serves the user's storage at /dav/ so EXTERNAL rclone clients (webdav
+  // backend, vendor=other) — or any WebDAV client — can mount Pufflet itself.
+  // Auth is HTTP Basic where the password is an API key. Disable with
+  // PUFFLET_DAV="false" (the mount then answers 404 on everything).
+  davEnabled: process.env.PUFFLET_DAV !== "false",
+  davMaxCopyFiles: intEnv("PUFFLET_DAV_COPY_MAX_FILES", 500), // server-side folder copy cap
 } as const;
 
 export const MAX_UPLOAD_BYTES = config.maxUploadMb * 1024 * 1024;
