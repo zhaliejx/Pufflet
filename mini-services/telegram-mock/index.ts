@@ -30,6 +30,15 @@ let nextId = 100;
 let nextMsgId = 1000;
 let pinnedMessageId = 0;
 
+// Fake Google Drive files for the remote-import e2e section.
+interface FakeDriveFile {
+  bytes: Uint8Array;
+  name: string;
+  mime: string;
+  mode: "public" | "scan" | "private";
+}
+const fakeDrive = new Map<string, FakeDriveFile>();
+
 // Where the mock "Bot API server" places files, mirroring --dir of the real
 // local server. getFile returns this absolute path; the app reads from disk.
 const FILE_DIR = path.join(tmpdir(), "pufflet-telegram-mock-files");
@@ -101,6 +110,83 @@ Bun.serve({
   async fetch(req) {
     const url = new URL(req.url);
     const path = url.pathname;
+
+    // --- fake Google Drive (remote-import e2e) --------------------------------
+    // Point the app at it with PUFFLET_GDRIVE_BASE=http://127.0.0.1:3031/fake-gdrive
+    // _seed  POST ?id=&name=&mime=&mode=public|scan|private   body: raw bytes
+    // download GET ?id=&export=download&confirm=t   (mirrors drive.usercontent.google.com)
+    // confirmed GET ?id=...   (target of the scan-warning confirm form)
+    if (path.startsWith("/fake-gdrive/")) {
+      const sub = path.slice("/fake-gdrive/".length);
+
+      if (req.method === "POST" && sub === "_seed") {
+        const id = url.searchParams.get("id") ?? "";
+        if (!id) return err(400, "fake-gdrive seed: id required");
+        const bytes = new Uint8Array(await readAll(req.body as ReadableStream<Uint8Array>));
+        const modeRaw = url.searchParams.get("mode") ?? "public";
+        const mode: FakeDriveFile["mode"] =
+          modeRaw === "scan" || modeRaw === "private" ? modeRaw : "public";
+        fakeDrive.set(id, {
+          bytes,
+          name: url.searchParams.get("name") ?? "file.bin",
+          mime: url.searchParams.get("mime") ?? "application/octet-stream",
+          mode,
+        });
+        return json({ ok: true, id, size: bytes.byteLength });
+      }
+
+      const serveFake = (id: string) => {
+        const f = fakeDrive.get(id);
+        if (!f) return null;
+        return new Response(f.bytes as unknown as BodyInit, {
+          headers: {
+            "content-type": f.mime,
+            "content-length": String(f.bytes.byteLength),
+            "content-disposition": `attachment; filename="${f.name.replace(/"/g, "")}"`,
+          },
+        });
+      };
+
+      if (req.method === "GET" && (sub === "download" || sub === "confirmed")) {
+        const id = url.searchParams.get("id") ?? "";
+        const f = fakeDrive.get(id);
+        if (!f) {
+          return new Response(
+            "<html><title>Google Drive</title><body>Sorry, this file doesn't exist or you don't have access to it.</body></html>",
+            { status: 200, headers: { "content-type": "text/html; charset=utf-8" } },
+          );
+        }
+        if (f.mode === "private") {
+          return new Response(
+            "<html><body>Sign in to continue to Google Drive<br>accounts.google.com/ServiceLogin</body></html>",
+            { status: 200, headers: { "content-type": "text/html; charset=utf-8" } },
+          );
+        }
+        if (f.mode === "scan" && sub === "download") {
+          // The real "virus scan warning" interstitial: a form whose hidden
+          // inputs (id/export/confirm/uuid) rebuild the actual download URL.
+          const form = new URL("/fake-gdrive/confirmed", url.origin);
+          for (const [k, v] of [
+            ["id", id],
+            ["export", "download"],
+            ["confirm", "t"],
+            ["uuid", "deadbeefcafe"],
+          ]) {
+            form.searchParams.set(k, v);
+          }
+          return new Response(
+            `<html><body>Google Drive - Virus scan warning<form action="${form.toString()}" method="get">` +
+              `<input type="hidden" name="id" value="${id}"><input type="hidden" name="export" value="download">` +
+              `<input type="hidden" name="confirm" value="t"><input type="hidden" name="uuid" value="deadbeefcafe">` +
+              `<input type="submit" value="Download anyway"></form></body></html>`,
+            { status: 200, headers: { "content-type": "text/html; charset=utf-8" } },
+          );
+        }
+        return serveFake(id) ?? err(404, "fake-gdrive: file vanished");
+      }
+
+      return new Response("mock fake-gdrive: no route", { status: 404 });
+    }
 
     // file download route: /file/bot<token>/<file_path>
     const filePrefix = `/file/bot${TOKEN}/`;

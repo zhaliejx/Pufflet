@@ -1,5 +1,6 @@
 import { getSessionUser } from "@/lib/auth";
 import { cancelUploadJob, getUploadJob, ServiceError } from "@/lib/files";
+import { abortRemoteUpload } from "@/lib/remote-import";
 import { errorResponse, jsonError, jsonOk, unauthorized } from "@/lib/api-utils";
 
 type Ctx = { params: Promise<{ id: string }> };
@@ -32,6 +33,8 @@ export async function DELETE(req: Request, ctx: Ctx) {
     if (!user) return unauthorized();
     const { id } = await ctx.params;
     await cancelUploadJob(user.id, id);
+    // If a Google Drive import is streaming for this job, stop it server-side.
+    abortRemoteUpload(id);
     return jsonOk({ ok: true });
   } catch (err) {
     if (err instanceof ServiceError) return jsonError(err.message, err.status);

@@ -301,6 +301,59 @@ contains "empty trash reports folder purge" "$ET" '"foldersPurged"'
 code=$(curl -s -o /dev/null -w '%{http_code}' "$BASE/api/files/$DFID" -b "$COOKIE")
 check "folder purge removed inner file (404)" "$code" "404"
 
+say "== 17. Google Drive remote import (fake Drive on the mock) =="
+# The server must run with PUFFLET_GDRIVE_BASE=http://127.0.0.1:3031/fake-gdrive
+GDURL="https://drive.google.com/file/d/e2e_gd_pub/view?usp=sharing"
+printf 'gdrive payload %s' "$RANDOM" > "$T/gd.txt"
+curl -s -X POST "http://localhost:3031/fake-gdrive/_seed?id=e2e_gd_pub&name=from-drive.txt&mime=text/plain" --data-binary @"$T/gd.txt" >/dev/null
+GDPROBE=$(curl -s -X POST "$BASE/api/uploads/remote" -b "$COOKIE" -H 'content-type: application/json' -d "{\"url\":\"$GDURL\",\"probe\":true}")
+contains "probe resolves filename" "$GDPROBE" 'from-drive.txt'
+contains "probe resolves size" "$GDPROBE" "\"size\":$(stat -c%s "$T/gd.txt")"
+GDBAD=$(curl -s -X POST "$BASE/api/uploads/remote" -b "$COOKIE" -H 'content-type: application/json' -d '{"url":"https://drive.google.com/drive/folders/1AbCdEfGhIjKlMnOpQrStUv"}')
+contains "folder link rejected with guidance" "$GDBAD" 'FOLDER'
+GDBOGUS=$(curl -s -X POST "$BASE/api/uploads/remote" -b "$COOKIE" -H 'content-type: application/json' -d '{"url":"https://evil.example.com/file/d/1a2B3c4D5e6F7g8H9i0J/view"}')
+contains "non-Drive host rejected" "$GDBOGUS" 'evil.example.com'
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/uploads/remote" -H 'content-type: application/json' -d '{"url":"https://drive.google.com/file/d/e2e_gd_pub/view"}')
+check "remote import requires session (401)" "$code" "401"
+curl -s -X POST "http://localhost:3031/fake-gdrive/_seed?id=e2e_gd_priv&name=secret.txt&mime=text/plain&mode=private" --data-binary @"$T/gd.txt" >/dev/null
+GDPRIV=$(curl -s -X POST "$BASE/api/uploads/remote" -b "$COOKIE" -H 'content-type: application/json' -d '{"url":"https://drive.google.com/file/d/e2e_gd_priv/view"}')
+contains "private file rejected with fix-it message" "$GDPRIV" 'Anyone with the link'
+# real import (plain) — poll the job row like the web client does
+GDIMP=$(curl -s -X POST "$BASE/api/uploads/remote" -b "$COOKIE" -H 'content-type: application/json' -d '{"url":"https://drive.google.com/uc?id=e2e_gd_pub","folderId":null}')
+contains "import accepted" "$GDIMP" '"uploadId"'
+GUPID=$(echo "$GDIMP" | sed 's/.*"uploadId":"\([^"]*\)".*/\1/')
+GDSTATUS=""
+for i in $(seq 1 20); do
+  GDJ=$(curl -s "$BASE/api/uploads/$GUPID" -b "$COOKIE")
+  GDSTATUS=$(echo "$GDJ" | sed 's/.*"status":"\([A-Z_]*\)".*/\1/')
+  [ "$GDSTATUS" = "READY" ] || [ "$GDSTATUS" = "FAILED" ] && break
+  sleep 1
+done
+check "import completes READY" "$GDSTATUS" "READY"
+if [ "$GDSTATUS" = "READY" ]; then
+  GDFILE=$(curl -s "$BASE/api/uploads/$GUPID" -b "$COOKIE" | sed 's/.*"fileId":"\([^"]*\)".*/\1/')
+  contains "imported file named from Drive" "$(curl -s "$BASE/api/files/$GDFILE" -b "$COOKIE")" 'from-drive.txt'
+  curl -s "$BASE/api/files/$GDFILE/download" -b "$COOKIE" -o "$T/gd-out.txt"
+  if cmp -s "$T/gd.txt" "$T/gd-out.txt"; then PASS_COUNT=$((PASS_COUNT+1)); say "  ok: imported bytes identical (Drive -> Telegram -> download)"; else FAIL_COUNT=$((FAIL_COUNT+1)); say "  FAIL: imported bytes differ"; fi
+else
+  FAIL_COUNT=$((FAIL_COUNT+1)); say "  FAIL: import job did not reach READY (got $GDSTATUS)"
+fi
+# scan-warning interstitial must be followed automatically (confirm form)
+curl -s -X POST "http://localhost:3031/fake-gdrive/_seed?id=e2e_gd_scan&name=scanned.bin&mime=application/octet-stream&mode=scan" --data-binary @"$T/gd.txt" >/dev/null
+GDIMP2=$(curl -s -X POST "$BASE/api/uploads/remote" -b "$COOKIE" -H 'content-type: application/json' -d '{"url":"https://drive.usercontent.google.com/download?id=e2e_gd_scan&export=download"}')
+contains "scan-page import accepted" "$GDIMP2" '"uploadId"'
+GUPID2=$(echo "$GDIMP2" | sed 's/.*"uploadId":"\([^"]*\)".*/\1/')
+GDSTATUS2=""
+for i in $(seq 1 20); do
+  GDSTATUS2=$(curl -s "$BASE/api/uploads/$GUPID2" -b "$COOKIE" | sed 's/.*"status":"\([A-Z_]*\)".*/\1/')
+  [ "$GDSTATUS2" = "READY" ] || [ "$GDSTATUS2" = "FAILED" ] && break
+  sleep 1
+done
+check "scan-warning import completes READY" "$GDSTATUS2" "READY"
+if [ "$GDSTATUS2" = "READY" ]; then
+  contains "scan-page file kept Drive name" "$(curl -s "$BASE/api/uploads/$GUPID2" -b "$COOKIE")" 'scanned.bin'
+fi
+
 say ""
 say "==================================="
 say "PASS: $PASS_COUNT   FAIL: $FAIL_COUNT"

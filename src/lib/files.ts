@@ -273,7 +273,11 @@ export async function storeUploadStream(
   ownerId: string,
   jobId: string,
   body: ReadableStream<Uint8Array>,
-  opts?: { hashStream?: (s: ReadableStream<Uint8Array>) => { stream: ReadableStream<Uint8Array>; digest: () => string } },
+  opts?: {
+    hashStream?: (s: ReadableStream<Uint8Array>) => { stream: ReadableStream<Uint8Array>; digest: () => string };
+    /** Provenance label for the File row ("web" device uploads, "gdrive" imports). */
+    uploaderLabel?: string;
+  },
 ): Promise<File> {
   const job = await getUploadJob(ownerId, jobId);
   if (job.status === "READY" && job.fileId) {
@@ -293,6 +297,11 @@ export async function storeUploadStream(
   }
 
   try {
+    // A cancel that lands mid-transfer must win over the final write, or a
+    // deleted queue entry would still produce a File row.
+    const fresh = await db.uploadJob.findUnique({ where: { id: job.id }, select: { status: true } });
+    if (fresh?.status === "CANCELED") throw new ServiceError("Upload was canceled", 409);
+
     await db.uploadJob.update({ where: { id: job.id }, data: { status: "STORING" } });
     const encoded = await encodeUploadStream(stream);
     const stored = await telegram().sendDocument(
@@ -315,7 +324,7 @@ export async function storeUploadStream(
           ownerId,
           folderId: job.folderId,
           sha256: digest?.(),
-          uploaderLabel: "web",
+          uploaderLabel: opts?.uploaderLabel ?? "web",
           tgChatId: stored.chatId,
           tgMessageId: stored.messageId,
           tgFileId: stored.fileId,
@@ -332,9 +341,15 @@ export async function storeUploadStream(
     return file;
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    await db.uploadJob
-      .update({ where: { id: job.id }, data: { status: "FAILED", error: message.slice(0, 300) } })
-      .catch(() => {});
+    // Never overwrite a CANCELED job with FAILED — the user asked to stop.
+    const current = await db.uploadJob
+      .findUnique({ where: { id: job.id }, select: { status: true } })
+      .catch(() => null);
+    if (current?.status !== "CANCELED") {
+      await db.uploadJob
+        .update({ where: { id: job.id }, data: { status: "FAILED", error: message.slice(0, 300) } })
+        .catch(() => {});
+    }
     throw err;
   }
 }
