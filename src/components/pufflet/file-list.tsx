@@ -36,6 +36,7 @@ import {
   CalendarArrowDown,
   CalendarArrowUp,
   ChevronsDown,
+  CloudUpload,
   Eye,
   File,
   FileArchive,
@@ -135,6 +136,7 @@ interface Actions {
   onRename: (t: RowTarget) => void;
   onMove: (t: RowTarget) => void;
   onStar: (row: FileRow) => void;
+  onSendToRclone?: (row: FileRow) => void;
   onTrash: (t: RowTarget) => void;
   onRestore: (t: RowTarget) => void;
   onPurge: (t: RowTarget) => void;
@@ -172,6 +174,13 @@ function ActionMenu({
             <MenuRow icon={FolderIcon} label="Open" onClick={() => actions.onOpenFolder(target.id)} />
           )}
           {target.type === "file" && <MenuRow icon={Link2} label="Share" onClick={() => actions.onShare(target)} />}
+          {target.type === "file" && actions.onSendToRclone && (
+            <MenuRow
+              icon={CloudUpload}
+              label="Send to rclone…"
+              onClick={() => actions.onSendToRclone!(target as unknown as FileRow)}
+            />
+          )}
           <MenuRow icon={Pencil} label="Rename" onClick={() => actions.onRename(target)} />
           <MenuRow icon={FolderInput} label="Move to…" onClick={() => actions.onMove(target)} />
           {target.type === "file" && (
@@ -277,6 +286,11 @@ function ContextShell({
             {target.type === "file" && (
               <ContextMenuItem onClick={() => actions.onShare(target)}>
                 <Link2 className="h-4 w-4" /> Share
+              </ContextMenuItem>
+            )}
+            {target.type === "file" && actions.onSendToRclone && (
+              <ContextMenuItem onClick={() => actions.onSendToRclone!(target as unknown as FileRow)}>
+                <CloudUpload className="h-4 w-4" /> Send to rclone…
               </ContextMenuItem>
             )}
             <ContextMenuItem onClick={() => actions.onRename(target)}>

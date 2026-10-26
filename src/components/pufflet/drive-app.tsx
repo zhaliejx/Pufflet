@@ -53,6 +53,7 @@ import {
 } from "./dialogs";
 import { PuffletIcon, PuffletWordmark } from "./logo";
 import { GDriveImportDialog, DriveIcon } from "./gdrive-dialog";
+import { RcloneSendDialog } from "./rclone-send-dialog";
 import {
   CloudUpload,
   FolderPlus,
@@ -184,6 +185,7 @@ export function DriveApp({ user, onSignOut }: Props) {
   const [shareTarget, setShareTarget] = useState<MoveTarget | null>(null);
   const [previewFile, setPreviewFile] = useState<FileRow | null>(null);
   const [gdriveOpen, setGDriveOpen] = useState(false);
+  const [rcloneSendTarget, setRcloneSendTarget] = useState<FileRow | null>(null);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [confirm, setConfirm] = useState<{
     title: string;
@@ -428,6 +430,7 @@ export function DriveApp({ user, onSignOut }: Props) {
       onPreview: (row: FileRow) => setPreviewFile(row),
       onDownload: (row: FileRow) => downloadFile(row.id),
       onShare: (t: RowTarget) => setShareTarget(t),
+      onSendToRclone: (row: FileRow) => setRcloneSendTarget(row),
       onRename: (t: RowTarget) => setRenameTarget(t),
       onMove: (t: RowTarget) => setMoveTarget(t),
       onStar: async (row: FileRow) => {
@@ -934,6 +937,12 @@ export function DriveApp({ user, onSignOut }: Props) {
         open={gdriveOpen}
         onClose={() => setGDriveOpen(false)}
         folderId={view === "folder" ? folderId : null}
+      />
+      <RcloneSendDialog
+        open={rcloneSendTarget !== null}
+        onClose={() => setRcloneSendTarget(null)}
+        file={rcloneSendTarget}
+        onSent={refresh}
       />
       {moveSelection && (
         <BulkMoveDialog

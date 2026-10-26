@@ -12,6 +12,7 @@ import { apiCall } from "./store";
 import { useTheme } from "next-themes";
 import { THEME_OPTIONS, useMounted } from "./theme-provider";
 import { ThemeIcon } from "./theme-toggle";
+import { RcloneCard } from "./rclone-card";
 import { toast } from "sonner";
 import {
   BadgeCheck,
@@ -254,6 +255,9 @@ export function SettingsPanel({ user }: Props) {
     <div className="space-y-6 max-w-3xl">
       {/* Appearance / theme picker */}
       <AppearanceCard />
+
+      {/* rclone storage integration */}
+      <RcloneCard />
 
       {/* Account / password */}
       <Card className="rounded-2xl">
