@@ -52,6 +52,7 @@ import {
   MoveTarget,
 } from "./dialogs";
 import { PuffletIcon, PuffletWordmark } from "./logo";
+import { GDriveImportDialog, DriveIcon } from "./gdrive-dialog";
 import {
   CloudUpload,
   FolderPlus,
@@ -110,6 +111,7 @@ export function DriveApp({ user, onSignOut }: Props) {
   const [moveTarget, setMoveTarget] = useState<MoveTarget | null>(null);
   const [shareTarget, setShareTarget] = useState<MoveTarget | null>(null);
   const [previewFile, setPreviewFile] = useState<FileRow | null>(null);
+  const [gdriveOpen, setGDriveOpen] = useState(false);
   const [shortcutsOpen, setShortcutsOpen] = useState(false);
   const [confirm, setConfirm] = useState<{
     title: string;
@@ -486,13 +488,22 @@ export function DriveApp({ user, onSignOut }: Props) {
             )}
           </div>
 
-          <Button
-            onClick={() => fileInputRef.current?.click()}
-            className="rounded-full pufflet-gradient text-white border-0 h-9 px-4"
-          >
-            <CloudUpload className="h-4 w-4" />
-            <span className="hidden sm:inline">Upload</span>
-          </Button>
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <Button className="rounded-full pufflet-gradient text-white border-0 h-9 px-4">
+                <CloudUpload className="h-4 w-4" />
+                <span className="hidden sm:inline">Upload</span>
+              </Button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-56">
+              <DropdownMenuItem onClick={() => fileInputRef.current?.click()}>
+                <CloudUpload className="h-4 w-4" /> Upload from device
+              </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => setGDriveOpen(true)}>
+                <DriveIcon className="h-4 w-4" /> From Google Drive…
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
           <input
             ref={fileInputRef}
             type="file"
@@ -813,6 +824,11 @@ export function DriveApp({ user, onSignOut }: Props) {
       <MoveDialog target={moveTarget} folders={allFolders.filter((f) => !f.trashedAt)} onClose={() => setMoveTarget(null)} onMoved={refresh} />
       <ShareDialog target={shareTarget} onClose={() => setShareTarget(null)} />
       <PreviewDialog file={previewFile} onClose={() => setPreviewFile(null)} />
+      <GDriveImportDialog
+        open={gdriveOpen}
+        onClose={() => setGDriveOpen(false)}
+        folderId={view === "folder" ? folderId : null}
+      />
       {moveSelection && (
         <BulkMoveDialog
           open

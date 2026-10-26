@@ -132,9 +132,13 @@ export function UploadDock() {
                   : u.status === "queued"
                     ? "queued…"
                     : u.status === "creating"
-                      ? "preparing…"
+                      ? u.remote
+                        ? "resolving Drive link…"
+                        : "preparing…"
                       : u.status === "uploading"
-                        ? `${u.progress}% · sending`
+                        ? u.remote
+                          ? "fetching from Google Drive…"
+                          : `${u.progress}% · sending`
                         : u.status === "finishing"
                           ? "100% — encrypting & storing securely…"
                           : u.status === "failed"

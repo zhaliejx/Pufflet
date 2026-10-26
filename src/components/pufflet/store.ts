@@ -77,13 +77,26 @@ export interface UploadItem {
   status: "queued" | "creating" | "uploading" | "finishing" | "done" | "failed" | "canceled";
   error?: string;
   attempts: number;
-  file: File | null; // kept for retry
+  file: File | null; // kept for retry (device uploads)
   folderId: string | null;
   xhr?: XMLHttpRequest;
+  remoteUrl?: string; // set for Google Drive imports — the server pulls the bytes
+  remote?: boolean; // dock UI hint (no client-side byte progress exists)
 }
 
 const MAX_PARALLEL_UPLOADS = 2;
 const MAX_UPLOAD_ATTEMPTS = 3;
+
+// Remote-import status polls, keyed by queue item key — cleared on cancel /
+// dismiss / completion so no timer ever outlives its item.
+const pollTimers = new Map<string, ReturnType<typeof setInterval>>();
+function stopPolling(key: string) {
+  const t = pollTimers.get(key);
+  if (t) {
+    clearInterval(t);
+    pollTimers.delete(key);
+  }
+}
 
 interface Listing {
   files: FileRow[];
@@ -148,6 +161,7 @@ interface DriveState {
   navigate: (id: string | null) => Promise<void>;
   loadMore: () => Promise<void>;
   uploadFiles: (files: File[], folderId: string | null) => void;
+  uploadFromUrl: (url: string, folderId: string | null) => void;
   retryUpload: (key: string) => void;
   retryFailedUploads: () => void;
   cancelUpload: (key: string) => void;
@@ -278,11 +292,84 @@ export const useDrive = create<DriveState>((set, get) => {
     })();
   }
 
+  function startNext(item: UploadItem) {
+    if (item.remoteUrl) startRemoteImport(item);
+    else startUpload(item);
+  }
+
   function pumpQueue() {
     const active = activeCount();
     if (active >= MAX_PARALLEL_UPLOADS) return;
     const next = get().uploads.find((u) => u.status === "queued");
-    if (next) startUpload(next);
+    if (next) startNext(next);
+  }
+
+  // Google Drive import: the SERVER pulls the bytes (Drive -> Pufflet ->
+  // Telegram), so there is no client-side progress. We create the job, then
+  // poll the UploadJob row — same states a device upload goes through.
+  function startRemoteImport(item: UploadItem) {
+    const url = item.remoteUrl!;
+    patchUpload(item.key, { status: "creating", progress: 0, error: undefined });
+
+    (async () => {
+      try {
+        const started = await api<{ uploadId: string; name: string; size: number }>(
+          "/api/uploads/remote",
+          { method: "POST", body: JSON.stringify({ url, folderId: item.folderId }) },
+        );
+        patchUpload(item.key, {
+          status: "uploading",
+          uploadId: started.uploadId,
+          name: started.name,
+          size: started.size,
+          progress: 0,
+          remote: true,
+        });
+
+        let misses = 0;
+        const timer = setInterval(async () => {
+          try {
+            const job = await api<{ status: string; error: string | null }>(
+              `/api/uploads/${started.uploadId}`,
+            );
+            misses = 0;
+            if (job.status === "READY") {
+              stopPolling(item.key);
+              patchUpload(item.key, { status: "done", progress: 100 });
+              toast.success(`Imported ${started.name}`);
+              scheduleRefresh();
+              setTimeout(pumpQueue, 0);
+            } else if (job.status === "FAILED") {
+              stopPolling(item.key);
+              patchUpload(item.key, { status: "failed", error: job.error ?? "Import failed" });
+              toast.error(`${started.name}: ${job.error ?? "import failed"}`);
+              scheduleRefresh();
+              setTimeout(pumpQueue, 0);
+            } else if (job.status === "CANCELED") {
+              stopPolling(item.key);
+              patchUpload(item.key, { status: "canceled" });
+              setTimeout(pumpQueue, 0);
+            } else if (job.status === "STORING") {
+              patchUpload(item.key, { status: "finishing" });
+            } else {
+              patchUpload(item.key, { status: "uploading", remote: true });
+            }
+          } catch {
+            misses += 1;
+            if (misses >= 5) {
+              stopPolling(item.key);
+              patchUpload(item.key, { status: "failed", error: "Lost contact with the server while importing" });
+              setTimeout(pumpQueue, 0);
+            }
+          }
+        }, 1500);
+        pollTimers.set(item.key, timer);
+      } catch (err) {
+        patchUpload(item.key, { status: "failed", error: err instanceof Error ? err.message : "Import failed" });
+        toast.error(err instanceof Error ? err.message : "Google Drive import failed");
+        setTimeout(pumpQueue, 0);
+      }
+    })();
   }
 
   return {
@@ -404,6 +491,25 @@ export const useDrive = create<DriveState>((set, get) => {
       const active = existing.filter((u) => u.status !== "done" && u.status !== "failed" && u.status !== "canceled");
       const added: UploadItem[] = [];
       for (const file of files) {
+        // Android "My Drive" picks often produce an EMPTY File (the browser
+        // cannot read cloud-only bytes) — fail fast with a fix-it message
+        // instead of an ugly Telegram error later.
+        if (file.size === 0) {
+          toast.error(
+            `${file.name}: no data could be read (0 bytes). If this file lives on Google Drive, use Upload ▾ → “From Google Drive” instead.`,
+            { duration: 8000 },
+          );
+          continue;
+        }
+        // Google Docs/Sheets/Slides "shortcuts" are tiny JSON stubs, not the
+        // document itself.
+        if (/\.(gdoc|gsheet|gslides|gdraw|gform)$/i.test(file.name)) {
+          toast.error(
+            `${file.name} is a Google Docs shortcut, not the document. Export it as PDF/Office, or import it via Upload ▾ → “From Google Drive”.`,
+            { duration: 8000 },
+          );
+          continue;
+        }
         // Accidental double-upload guard: same name+size already queued/running.
         if (active.some((u) => u.name === file.name && u.size === file.size)) {
           toast.info(`${file.name} is already uploading`);
@@ -426,9 +532,38 @@ export const useDrive = create<DriveState>((set, get) => {
       for (let i = 0; i < MAX_PARALLEL_UPLOADS; i++) pumpQueue();
     },
 
+    uploadFromUrl: (url, folderId) => {
+      const trimmed = url.trim();
+      if (!trimmed) return;
+      const busy = (u: UploadItem) => u.status !== "done" && u.status !== "failed" && u.status !== "canceled";
+      if (get().uploads.some((u) => u.remoteUrl === trimmed && busy(u))) {
+        toast.info("That link is already importing");
+        return;
+      }
+      const key = `gdrive-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+      set((s) => ({
+        uploads: [
+          {
+            key,
+            name: "Google Drive file…",
+            size: 0,
+            progress: 0,
+            status: "queued",
+            attempts: 1,
+            file: null,
+            folderId,
+            remoteUrl: trimmed,
+            remote: true,
+          },
+          ...s.uploads,
+        ],
+      }));
+      pumpQueue();
+    },
+
     retryUpload: (key) => {
       const item = get().uploads.find((u) => u.key === key);
-      if (!item || !item.file) return;
+      if (!item || (!item.file && !item.remoteUrl)) return;
       if (item.attempts >= MAX_UPLOAD_ATTEMPTS) {
         toast.error(`${item.name}: too many attempts — remove and re-add the file`);
         return;
@@ -438,7 +573,7 @@ export const useDrive = create<DriveState>((set, get) => {
     },
 
     retryFailedUploads: () => {
-      const failed = get().uploads.filter((u) => u.status === "failed" && u.file);
+      const failed = get().uploads.filter((u) => u.status === "failed" && (u.file || u.remoteUrl));
       if (!failed.length) return;
       set((s) => ({
         uploads: s.uploads.map((u) =>
@@ -458,13 +593,17 @@ export const useDrive = create<DriveState>((set, get) => {
       const item = get().uploads.find((u) => u.key === key);
       if (!item) return;
       item?.xhr?.abort();
+      stopPolling(key);
       if (item.uploadId && item.status !== "queued") {
         fetch(`/api/uploads/${item.uploadId}`, { method: "DELETE" }).catch(() => {});
       }
       set((s) => ({ uploads: s.uploads.filter((u) => u.key !== key) }));
     },
 
-    dismissUpload: (key) => set((s) => ({ uploads: s.uploads.filter((u) => u.key !== key) })),
+    dismissUpload: (key) => {
+      stopPolling(key);
+      set((s) => ({ uploads: s.uploads.filter((u) => u.key !== key) }));
+    },
 
     clearFinishedUploads: () =>
       set((s) => ({
