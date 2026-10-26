@@ -86,6 +86,77 @@ interface BulkResult {
   errors: { id: string; error: string }[];
 }
 
+// ---- drag & drop folder walking -------------------------------------------
+
+interface DroppedFile {
+  file: File;
+  relPath: string;
+}
+
+async function entryFile(entry: FileSystemFileEntry): Promise<File | null> {
+  return new Promise((resolve) => {
+    entry.file(
+      (f) => resolve(f),
+      () => resolve(null), // unreadable entry — skip it, don't kill the whole drop
+    );
+  });
+}
+
+/**
+ * Recursively walk dropped FileSystemEntries so FOLDERS keep their structure
+ * (the plain dataTransfer.files list flattens everything). Empty directories
+ * are reported too so the server creates them. readEntries hands back at most
+ * ~100 entries per call, hence the loop-until-empty.
+ */
+async function walkDirectoryEntry(dir: FileSystemDirectoryEntry, prefix: string, out: { files: DroppedFile[]; dirs: string[]; unreadable: number }, cap: number): Promise<void> {
+  const path = prefix ? `${prefix}/${dir.name}` : dir.name;
+  out.dirs.push(path);
+  const reader = dir.createReader();
+  for (;;) {
+    const batch = await new Promise<FileSystemEntry[]>((resolve, reject) => {
+      reader.readEntries(
+        (entries) => resolve(entries as FileSystemEntry[]),
+        () => reject(new Error("readEntries failed")),
+      );
+    });
+    if (!batch.length) break;
+    for (const entry of batch) {
+      if (out.files.length >= cap) return;
+      if (entry.isFile) {
+        const file = await entryFile(entry as FileSystemFileEntry);
+        if (file) out.files.push({ file, relPath: `${path}/${file.name}` });
+        else out.unreadable++;
+      } else if (entry.isDirectory) {
+        await walkDirectoryEntry(entry as FileSystemDirectoryEntry, path, out, cap);
+      }
+    }
+  }
+}
+
+async function collectDroppedItems(items: DataTransferItemList): Promise<{ files: DroppedFile[]; dirs: string[]; unreadable: number }> {
+  const out = { files: [] as DroppedFile[], dirs: [] as string[], unreadable: 0 };
+  const CAP = 1000; // matches the uploadFolder batch cap
+  // IMPORTANT: webkitGetAsEntry() must be called synchronously while the
+  // DataTransferItemList is still valid — grab every entry first, walk after.
+  const entries: FileSystemEntry[] = [];
+  for (const item of Array.from(items)) {
+    if (item.kind !== "file") continue;
+    const entry = item.webkitGetAsEntry();
+    if (entry) entries.push(entry);
+  }
+  for (const entry of entries) {
+    if (out.files.length >= CAP) break;
+    if (entry.isFile) {
+      const file = await entryFile(entry as FileSystemFileEntry);
+      if (file) out.files.push({ file, relPath: file.name }); // loose file → current folder
+      else out.unreadable++;
+    } else if (entry.isDirectory) {
+      await walkDirectoryEntry(entry as FileSystemDirectoryEntry, "", out, CAP);
+    }
+  }
+  return out;
+}
+
 export function DriveApp({ user, onSignOut }: Props) {
   const view = useDrive((s) => s.view);
   const folderId = useDrive((s) => s.folderId);
@@ -104,6 +175,7 @@ export function DriveApp({ user, onSignOut }: Props) {
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const searchRef = useRef<HTMLInputElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const dirInputRef = useRef<HTMLInputElement>(null);
 
   // dialog state
   const [newFolderOpen, setNewFolderOpen] = useState(false);
@@ -321,22 +393,31 @@ export function DriveApp({ user, onSignOut }: Props) {
   }
 
   // ---- drag & drop ----
-  function onDrop(e: React.DragEvent) {
+  async function onDrop(e: React.DragEvent) {
     e.preventDefault();
     setDragging(false);
-    const files: File[] = [];
-    if (e.dataTransfer.items) {
-      for (const item of Array.from(e.dataTransfer.items)) {
-        if (item.kind === "file") {
-          const f = item.getAsFile();
-          if (f) files.push(f);
+    const target = useDrive.getState().view === "folder" ? useDrive.getState().folderId : null;
+
+    // Rich path: walk dropped entries so FOLDERS keep their structure.
+    if (e.dataTransfer.items && e.dataTransfer.items.length > 0 && typeof e.dataTransfer.items[0].webkitGetAsEntry === "function") {
+      try {
+        const { files, dirs, unreadable } = await collectDroppedItems(e.dataTransfer.items);
+        if (unreadable > 0) {
+          toast.error(`${unreadable} item(s) could not be read and were skipped.`, { duration: 7000 });
         }
+        if (files.length || dirs.length) {
+          useDrive.getState().uploadFolder(files, dirs, target);
+          return;
+        }
+      } catch {
+        // entry walk failed — fall through to the flat-file path below
       }
-    } else {
-      files.push(...Array.from(e.dataTransfer.files));
     }
+
+    // Fallback: flat files (no entry API support).
+    const files: File[] = Array.from(e.dataTransfer?.files ?? []);
     if (files.length) {
-      useDrive.getState().uploadFiles(files, useDrive.getState().view === "folder" ? useDrive.getState().folderId : null);
+      useDrive.getState().uploadFiles(files, target);
     }
   }
 
@@ -447,7 +528,7 @@ export function DriveApp({ user, onSignOut }: Props) {
         <div className="fixed inset-0 z-50 bg-primary/20 backdrop-blur-[2px] flex items-center justify-center pointer-events-none">
           <div className="rounded-3xl bg-card/95 border shadow-xl px-10 py-8 flex flex-col items-center gap-3 animate-fade-up">
             <img src="/logo-icon.svg" alt="" className="w-20" />
-            <p className="font-brand font-semibold text-brand-heading text-lg">Drop to upload to Pufflet</p>
+            <p className="font-brand font-semibold text-brand-heading text-lg">Drop files or folders to upload</p>
           </div>
         </div>
       )}
@@ -499,6 +580,9 @@ export function DriveApp({ user, onSignOut }: Props) {
               <DropdownMenuItem onClick={() => fileInputRef.current?.click()}>
                 <CloudUpload className="h-4 w-4" /> Upload from device
               </DropdownMenuItem>
+              <DropdownMenuItem onClick={() => dirInputRef.current?.click()}>
+                <FolderInput className="h-4 w-4" /> Upload folder…
+              </DropdownMenuItem>
               <DropdownMenuItem onClick={() => setGDriveOpen(true)}>
                 <DriveIcon className="h-4 w-4" /> From Google Drive…
               </DropdownMenuItem>
@@ -513,6 +597,28 @@ export function DriveApp({ user, onSignOut }: Props) {
               const picked = Array.from(e.target.files ?? []);
               if (picked.length) {
                 useDrive.getState().uploadFiles(picked, useDrive.getState().view === "folder" ? useDrive.getState().folderId : null);
+              }
+              e.target.value = "";
+            }}
+          />
+          {/* directory picker — uploads keep their structure via webkitRelativePath */}
+          <input
+            ref={dirInputRef}
+            type="file"
+            multiple
+            className="hidden"
+            {...({ webkitdirectory: "", directory: "" } as Record<string, string>)}
+            onChange={(e) => {
+              const picked = Array.from(e.target.files ?? []).map((file) => ({
+                file,
+                relPath: (file as File & { webkitRelativePath?: string }).webkitRelativePath || file.name,
+              }));
+              if (picked.length) {
+                useDrive.getState().uploadFolder(
+                  picked,
+                  [],
+                  useDrive.getState().view === "folder" ? useDrive.getState().folderId : null,
+                );
               }
               e.target.value = "";
             }}

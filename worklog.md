@@ -324,3 +324,36 @@ Work Log:
 
 Stage Summary:
 - Users can now paste a Google Drive share link and the SERVER pulls the file (Drive → Pufflet → Telegram): no phone-side download, no OAuth, encrypted storage as usual. Committed as 3 commits on local main (ed61c4c + 3 new); PUSH PENDING — no GitHub credentials stored in this environment, need a fresh PAT from the user to push (old token was never persisted, rotation already advised)
+
+---
+Task ID: 24-b
+Agent: main (Z.ai)
+Task: Push pending GDrive commits to origin/main with user-supplied PAT
+
+Work Log:
+- Verified working tree clean, 3 commits ahead (cc39ef6 gdrive backend, e312f38 ui, 402c257 docs)
+- Pushed via explicit URL with embedded PAT (not stored in git config): ed61c4c..402c257 main -> main
+- git update-ref refs/remotes/origin/main refs/heads/main to restore tracking; branch now up to date
+
+Stage Summary:
+- Google Drive direct import feature is now on origin/main (402c257) → Render auto-deploys. Reminder already given to user: revoke/rotate this PAT after the push since it was shared in chat.
+
+---
+Task ID: 25
+Agent: main (Z.ai)
+Task: Pufflet folder upload — structure-preserving directory uploads (picker + drag-drop)
+
+Work Log:
+- Recon: read upload pipeline (uploads route, data sink, store queue, dock), folder services (createFolder/uniqueFolderName/purgeFolder), drive-app drop wiring before writing code
+- NEW pure planner planEnsurePaths in folder-utils.ts: find-or-create walk over relative paths — reuses existing ACTIVE same-name folders (Drive semantics), ignores trashed ones, plans parents strictly before children, overlays in-flight creates across sibling paths, validates segments (traversal/forbidden chars/length) and depth (baseDepth of target parent + segments vs config.maxFolderDepth)
+- files.ts: ensureFolderPaths service (loads tree once, executes plan, audits folder.create per created folder, caps 2000 paths/request); returns folders map path->id + created count + per-path errors
+- Routes: POST /api/folders/ensure-paths (session, 30/min rate limit) + POST /api/v1/folders/ensure-paths (withToken write scope)
+- store.ts: uploadFolder(picked, dirs, folderId) — validates segments, aggregates 0-byte/Docs-shortcut/invalid-name skips into batch toasts, ONE ensure-paths round trip, queues each file into its resolved folder with relPath on the UploadItem; dedupe guard now scoped by target folderId (same name+size in different folders is legitimate); 1000-file batch cap
+- drive-app.tsx: "Upload folder…" menu item + hidden webkitdirectory input (relPath from webkitRelativePath); drop handler rewritten to walk webkitGetAsEntry() recursively (entries grabbed synchronously, readEntries loop-until-empty, empty dirs reported, unreadable counted), falls back to flat files; overlay copy now "Drop files or folders"
+- upload-dock.tsx: relative-path subtitle for folder uploads
+- e2e section 18 (12 checks): 401s, 400, one-round-trip tree, idempotent reuse (same ids, created:0), invalid-path errors alongside valid resolution, nested upload into created folder, v1 mirror, trash+purge cleanup; sections 17/18 now self-clean (stale from-drive*/scanned.bin/e2e_up_* removed at start) so repeat runs are deterministic
+- BUG (env): a stale standalone server from an earlier session held :3100 with EADDRINUSE — the suite silently ran against the OLD build ("Unknown action"); also learned background servers die between tool calls — server+suite must share one shell invocation
+- VALIDATION: bun test 122/122 (14 new planner tests); eslint clean; tsc 23 = 22 pre-existing baseline + 1 same-class bun:test-module (new test file); production build EXIT=0 with both routes in manifest; FULL e2e 102/102 against node standalone; agent-browser on the standalone: login → Upload menu shows "Upload folder…", synthetic DataTransfer drop drove walker→queue→listing roundtrip, zero page errors (download/folder-upload-verified.png)
+
+Stage Summary:
+- Pufflet now uploads whole folders with structure intact: picker (webkitdirectory) or drag-drop both route every file into a find-or-created folder tree (one server round trip), with per-file progress/retry/cancel unchanged, relPath shown per dock item, empty dropped folders created, and the same primitive exposed to API users via /api/folders/ensure-paths + /api/v1/folders/ensure-paths. No schema changes, no migrations, no existing behavior altered (device dedupe guard only got folder-scoped).

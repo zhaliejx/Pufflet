@@ -575,6 +575,28 @@ How it works and what to know:
   telegram-mock service implements one), which is how the end-to-end suite
   validates imports — including the scan-warning flow — without internet.
 
+### Folder upload
+
+**Upload ▾ → Upload folder…** (or drop a folder onto the app) uploads an entire
+directory tree with its structure intact: every file lands in a matching folder
+inside Pufflet, so a 300-photo camera roll with year subfolders reproduces
+exactly.
+
+- Folder creation is **find-or-create**: uploading “Trip” twice fills the SAME
+  folder instead of duplicating “Trip (2)”. Empty folders dropped by drag &
+  drop are created too. The whole tree is created in one round trip
+  (`POST /api/folders/ensure-paths`, also mirrored on `/api/v1` with a `write`
+  key), then files stream through the same encrypted upload queue with
+  per-file progress, retry, and cancel.
+- The uploads dock shows each file's relative path (e.g. `Trip/day1/IMG_1.jpg`)
+  while it uploads. Existing same-name files elsewhere are untouched; the
+  folder structure caps: 1000 files per batch, Pufflet's normal folder-depth
+  limit (20), and the standard per-file upload limit apply.
+- Two honest browser limits: the directory **picker** cannot see empty folders
+  (drag & drop can), and cloud placeholders (Google Drive files picked via the
+  system file manager) still arrive as 0-byte stubs — those are skipped with
+  the “import via From Google Drive” hint as usual.
+
 ### Any host (bare Node/Bun)
 
 - Build with `npm run build && npm run start` (or run `bun run dev` behind a

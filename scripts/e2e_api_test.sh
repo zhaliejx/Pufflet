@@ -303,6 +303,15 @@ check "folder purge removed inner file (404)" "$code" "404"
 
 say "== 17. Google Drive remote import (fake Drive on the mock) =="
 # The server must run with PUFFLET_GDRIVE_BASE=http://127.0.0.1:3031/fake-gdrive
+# Deterministic re-runs: drop stale imports (incl. "... (2)" dedup leftovers)
+# from earlier suite runs so name checks stay exact.
+bun -e '
+import { PrismaClient } from "@prisma/client";
+const db = new PrismaClient();
+const user = await db.user.findUnique({ where: { email: "owner@pufflet.test" } });
+if (user) await db.file.deleteMany({ where: { ownerId: user.id, OR: [{ name: { startsWith: "from-drive" } }, { name: "scanned.bin" }] } });
+await db.$disconnect();
+' >/dev/null 2>&1
 GDURL="https://drive.google.com/file/d/e2e_gd_pub/view?usp=sharing"
 printf 'gdrive payload %s' "$RANDOM" > "$T/gd.txt"
 curl -s -X POST "http://localhost:3031/fake-gdrive/_seed?id=e2e_gd_pub&name=from-drive.txt&mime=text/plain" --data-binary @"$T/gd.txt" >/dev/null
@@ -353,6 +362,68 @@ check "scan-warning import completes READY" "$GDSTATUS2" "READY"
 if [ "$GDSTATUS2" = "READY" ]; then
   contains "scan-page file kept Drive name" "$(curl -s "$BASE/api/uploads/$GUPID2" -b "$COOKIE")" 'scanned.bin'
 fi
+# cleanup: purge the fresh imports so repeated runs never hit dedup renames
+GDFILE2=$(curl -s "$BASE/api/uploads/$GUPID2" -b "$COOKIE" | sed 's/.*"fileId":"\([^"]*\)".*/\1/')
+curl -s -X DELETE "$BASE/api/files/$GDFILE?permanent=1" -b "$COOKIE" >/dev/null
+curl -s -X DELETE "$BASE/api/files/$GDFILE2?permanent=1" -b "$COOKIE" >/dev/null
+
+say "== 18. Folder upload (ensure-paths + nested upload) =="
+# Deterministic re-runs: drop any e2e_up_* tree left by an earlier crashed run.
+bun -e '
+import { PrismaClient } from "@prisma/client";
+const db = new PrismaClient();
+const user = await db.user.findUnique({ where: { email: "owner@pufflet.test" } });
+if (user) {
+  const all = await db.folder.findMany({ where: { ownerId: user.id }, select: { id: true, parentId: true } });
+  const roots = await db.folder.findMany({ where: { ownerId: user.id, name: { in: ["e2e_up_a", "e2e_up_b"] } }, select: { id: true } });
+  const childrenOf = new Map<string, string[]>();
+  for (const f of all) if (f.parentId) childrenOf.set(f.parentId, [...(childrenOf.get(f.parentId) ?? []), f.id]);
+  const doomed = new Set<string>(roots.map((r) => r.id));
+  const queue = [...doomed];
+  while (queue.length) {
+    for (const c of childrenOf.get(queue.shift() as string) ?? []) if (!doomed.has(c)) { doomed.add(c); queue.push(c); }
+  }
+  await db.file.deleteMany({ where: { ownerId: user.id, folderId: { in: [...doomed] } } });
+  await db.folder.deleteMany({ where: { id: { in: [...doomed] } } });
+}
+await db.$disconnect();
+' >/dev/null 2>&1
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/folders/ensure-paths" -H 'content-type: application/json' -d '{"paths":["x"]}')
+check "ensure-paths requires session (401)" "$code" "401"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/v1/folders/ensure-paths" -H 'content-type: application/json' -d '{"paths":["x"]}')
+check "v1 ensure-paths requires token (401)" "$code" "401"
+code=$(curl -s -o /dev/null -w '%{http_code}' -X POST "$BASE/api/folders/ensure-paths" -b "$COOKIE" -H 'content-type: application/json' -d '{}')
+check "ensure-paths without paths rejected (400)" "$code" "400"
+# build a tree in one round trip
+E1=$(curl -s -X POST "$BASE/api/folders/ensure-paths" -b "$COOKIE" -H 'content-type: application/json' -d '{"paths":["e2e_up_a","e2e_up_a/sub","e2e_up_b"]}')
+contains "ensure-paths returns folder ids" "$E1" '"e2e_up_a/sub":"'
+EAID=$(echo "$E1" | sed 's/.*"e2e_up_a":"\([^"]*\)".*/\1/')
+ESUBID=$(echo "$E1" | sed 's/.*"e2e_up_a\/sub":"\([^"]*\)".*/\1/')
+EBID=$(echo "$E1" | sed 's/.*"e2e_up_b":"\([^"]*\)".*/\1/')
+# second call reuses the SAME folders (find-or-create, not duplicates)
+E2=$(curl -s -X POST "$BASE/api/folders/ensure-paths" -b "$COOKIE" -H 'content-type: application/json' -d '{"paths":["e2e_up_a","e2e_up_a/sub","e2e_up_b"]}')
+check "ensure-paths reuses existing folders" "$(echo "$E2" | sed 's/.*"e2e_up_a\/sub":"\([^"]*\)".*/\1/')" "$ESUBID"
+contains "reuse reports zero created" "$E2" '"created":0'
+# invalid segment lands in errors; valid paths still resolve
+E3=$(curl -s -X POST "$BASE/api/folders/ensure-paths" -b "$COOKIE" -H 'content-type: application/json' -d '{"paths":["..","e2e_up_b"]}')
+contains "invalid path reported with reason" "$E3" 'Invalid folder name'
+check "valid path resolved alongside invalid" "$(echo "$E3" | sed 's/.*"e2e_up_b":"\([^"]*\)".*/\1/')" "$EBID"
+# upload INTO the created nested folder
+printf 'nested folder payload %s' "$RANDOM" > "$T/nested.txt"
+NJOB=$(curl -s -X POST "$BASE/api/uploads" -b "$COOKIE" -H 'content-type: application/json' -d "{\"filename\":\"e2e_nested.txt\",\"size\":$(stat -c%s "$T/nested.txt"),\"folderId\":\"$ESUBID\"}")
+NUP=$(echo "$NJOB" | sed 's/.*"uploadId":"\([^"]*\)".*/\1/')
+curl -s -X PUT "$BASE/api/uploads/$NUP/data" -b "$COOKIE" -H 'content-type: application/octet-stream' --data-binary @"$T/nested.txt" >/dev/null
+contains "nested file listed inside created folder" "$(curl -s "$BASE/api/files?view=folder&folderId=$ESUBID" -b "$COOKIE")" 'e2e_nested.txt'
+# v1 mirror works with an API key, under an existing parent
+V1E=$(curl -s -X POST "$BASE/api/v1/folders/ensure-paths" -H "Authorization: Bearer $TOK" -H 'content-type: application/json' -d "{\"parentId\":\"$EBID\",\"paths\":[\"inner\"]}")
+contains "v1 ensure-paths creates under parent" "$V1E" '"inner":"'
+# cleanup: trash then permanent-delete both roots (purges nested content too)
+curl -s -X DELETE "$BASE/api/folders/$EAID" -b "$COOKIE" >/dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$BASE/api/folders/$EAID?permanent=1" -b "$COOKIE")
+check "cleanup: purge e2e_up_a" "$code" "200"
+curl -s -X DELETE "$BASE/api/folders/$EBID" -b "$COOKIE" >/dev/null
+code=$(curl -s -o /dev/null -w '%{http_code}' -X DELETE "$BASE/api/folders/$EBID?permanent=1" -b "$COOKIE")
+check "cleanup: purge e2e_up_b" "$code" "200"
 
 say ""
 say "==================================="

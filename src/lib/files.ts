@@ -5,7 +5,7 @@
 
 import { db } from "@/lib/db";
 import { config } from "@/lib/config";
-import { sanitizeName } from "@/lib/folder-utils";
+import { planEnsurePaths, sanitizeName } from "@/lib/folder-utils";
 import { telegram } from "@/lib/telegram";
 import { audit } from "@/lib/audit";
 import { encodeUploadStream, obfuscatedStorageName } from "@/lib/vault";
@@ -511,6 +511,52 @@ export async function createFolder(ownerId: string, rawName: string, parentId: s
   const folder = await db.folder.create({ data: { name: finalName, ownerId, parentId } });
   audit("folder.create", ownerId, folder.id, finalName);
   return folder;
+}
+
+/** Hard caps for one ensure-paths call (folder uploads) — bounded work per request. */
+const ENSURE_PATHS_MAX = 2000;
+
+/**
+ * Folder-upload support: find-or-create every relative directory path under
+ * `parentId` in ONE call so the client can upload a whole folder tree with a
+ * single round trip before streaming the files.
+ *
+ * Existing ACTIVE folders with the same name are REUSED (Google Drive
+ * behavior) — uploading "Trip" twice fills the same folder instead of
+ * creating "Trip (2)". Trashed same-name folders are ignored. Returns a map
+ * path -> folderId for every valid input path.
+ */
+export async function ensureFolderPaths(
+  ownerId: string,
+  parentId: string | null,
+  rawPaths: string[],
+): Promise<{ folders: Record<string, string>; created: number; errors: { path: string; reason: string }[] }> {
+  if (parentId) {
+    const parent = await assertFolderAccess(parentId, ownerId);
+    if (parent.trashedAt) throw new ServiceError("Cannot create inside a trashed folder", 400);
+  }
+  if (!Array.isArray(rawPaths) || rawPaths.length > ENSURE_PATHS_MAX) {
+    throw new ServiceError(`Too many folder paths (max ${ENSURE_PATHS_MAX} per request)`, 400, "TOO_MANY");
+  }
+  // Normalize each path into clean segments: trim, drop empties. Structural
+  // validation ("..", forbidden chars, depth) happens in the planner.
+  const paths = rawPaths
+    .filter((p): p is string => typeof p === "string")
+    .map((p) => p.split("/").map((s) => s.trim()).filter((s) => s.length > 0));
+
+  const existing = await allFolders(ownerId);
+  const plan = planEnsurePaths(existing, parentId, paths, config.maxFolderDepth);
+
+  const createdMap: Record<string, string> = {};
+  for (const step of plan.steps) {
+    // parentKey: null = caller's parent, an existing folder id, or a step key
+    // created earlier in this loop (parents are strictly first).
+    const parent = step.parentKey ? (createdMap[step.parentKey] ?? step.parentKey) : parentId;
+    const folder = await db.folder.create({ data: { name: step.name, ownerId, parentId: parent ?? null } });
+    createdMap[step.key] = folder.id;
+    audit("folder.create", ownerId, folder.id, step.name);
+  }
+  return { folders: { ...plan.resolved, ...createdMap }, created: plan.steps.length, errors: plan.errors };
 }
 
 export async function listFolders(ownerId: string, opts: { all?: boolean } = {}) {

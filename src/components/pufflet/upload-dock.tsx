@@ -123,6 +123,12 @@ export function UploadDock() {
                   )}
                 </span>
               </div>
+              {/* folder uploads: show where this file sits inside the picked tree */}
+              {u.relPath && u.relPath !== u.name && (
+                <p className="text-[11px] text-muted-foreground/80 truncate" title={u.relPath}>
+                  {u.relPath}
+                </p>
+              )}
               {u.status === "uploading" || u.status === "finishing" ? (
                 <Progress value={u.progress} className="h-1.5 mt-1.5" />
               ) : null}

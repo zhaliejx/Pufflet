@@ -69,6 +69,7 @@ privately by the browser for 1 hour; attachment downloads are `no-store`.
 | DELETE | `/api/v1/files/{id}/share?linkId={id}` | write | Revoke a share link |
 | GET | `/api/v1/folders` | read | List folders (`all=1` includes trashed, with `trashedAt`) |
 | POST | `/api/v1/folders` | write | Create folder (`{name, parentId?}`) |
+| POST | `/api/v1/folders/ensure-paths` | write | Find-or-create a relative directory tree (`{parentId?, paths: ["Trip/day1", …]}`) — folder-upload primitive, returns `{folders: {path: id}, created, errors}` |
 | PATCH | `/api/v1/folders/{id}` | write | Rename (`{name}`) or move (`{parentId}`) |
 | DELETE | `/api/v1/folders/{id}` | delete | Trash subtree |
 | DELETE | `/api/v1/folders/{id}?permanent=1` | delete | Purge subtree |

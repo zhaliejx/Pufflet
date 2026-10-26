@@ -79,6 +79,7 @@ export interface UploadItem {
   attempts: number;
   file: File | null; // kept for retry (device uploads)
   folderId: string | null;
+  relPath?: string; // folder uploads: full relative path "Trip/day1/img.jpg" (dock display)
   xhr?: XMLHttpRequest;
   remoteUrl?: string; // set for Google Drive imports — the server pulls the bytes
   remote?: boolean; // dock UI hint (no client-side byte progress exists)
@@ -161,6 +162,7 @@ interface DriveState {
   navigate: (id: string | null) => Promise<void>;
   loadMore: () => Promise<void>;
   uploadFiles: (files: File[], folderId: string | null) => void;
+  uploadFolder: (picked: { file: File; relPath: string }[], dirs: string[], folderId: string | null) => void;
   uploadFromUrl: (url: string, folderId: string | null) => void;
   retryUpload: (key: string) => void;
   retryFailedUploads: () => void;
@@ -510,8 +512,10 @@ export const useDrive = create<DriveState>((set, get) => {
           );
           continue;
         }
-        // Accidental double-upload guard: same name+size already queued/running.
-        if (active.some((u) => u.name === file.name && u.size === file.size)) {
+        // Accidental double-upload guard: same name+size already queued/running
+        // into the SAME target folder (same name+size in different folders is
+        // legitimate during folder uploads).
+        if (active.some((u) => u.name === file.name && u.size === file.size && u.folderId === folderId)) {
           toast.info(`${file.name} is already uploading`);
           continue;
         }
@@ -530,6 +534,129 @@ export const useDrive = create<DriveState>((set, get) => {
       if (!added.length) return;
       set((s) => ({ uploads: [...added, ...s.uploads] }));
       for (let i = 0; i < MAX_PARALLEL_UPLOADS; i++) pumpQueue();
+    },
+
+    // Folder upload: create the whole directory tree server-side (ONE round
+    // trip), then queue each file into its resolved target folder with the
+    // same per-file progress/retry engine as device uploads.
+    uploadFolder: (picked, dirs, folderId) => {
+      const CAP = 1000;
+      if (!picked.length && !dirs.length) return;
+      if (picked.length > CAP) {
+        toast.error(
+          `Folder uploads are capped at ${CAP} files per batch — this selection has ${picked.length}. Split it and try again.`,
+          { duration: 9000 },
+        );
+        return;
+      }
+      const active = get().uploads.filter(
+        (u) => u.status !== "done" && u.status !== "failed" && u.status !== "canceled",
+      );
+
+      const validSegment = (s: string) => !!s && s !== "." && s !== ".." && s.length <= 180 && !/[/\\\u0000-\u001f]/.test(s);
+
+      // 1) Validate + collect the directory tree (relPath prefixes + empty dirs).
+      const paths = new Set<string>();
+      const accepted: { file: File; relPath: string }[] = [];
+      let skippedZero = 0;
+      let skippedStub = 0;
+      let skippedName = 0;
+      for (const { file, relPath } of picked) {
+        const segs = relPath.split("/");
+        const fileName = segs[segs.length - 1] || file.name;
+        if (!segs.every(validSegment)) {
+          skippedName++;
+          continue;
+        }
+        if (file.size === 0) {
+          skippedZero++;
+          continue;
+        }
+        if (/\.(gdoc|gsheet|gslides|gdraw|gform)$/i.test(fileName)) {
+          skippedStub++;
+          continue;
+        }
+        accepted.push({ file, relPath });
+        for (let i = 1; i < segs.length; i++) paths.add(segs.slice(0, i).join("/"));
+      }
+      // Empty folders only surface via drag-and-drop (webkitGetAsEntry) — the
+      // directory picker input can't see them.
+      for (const d of dirs) {
+        const segs = d.split("/").filter((s) => s.length > 0);
+        if (!segs.length || !segs.every(validSegment)) continue;
+        segs.forEach((_, i) => paths.add(segs.slice(0, i + 1).join("/")));
+      }
+      if (skippedZero) {
+        toast.error(
+          `${skippedZero} file(s) could not be read (0 bytes). If they live on Google Drive, import them via Upload ▾ → “From Google Drive”.`,
+          { duration: 8000 },
+        );
+      }
+      if (skippedStub) {
+        toast.error(
+          `${skippedStub} Google Docs shortcut(s) skipped — export them as PDF/Office, or import via “From Google Drive”.`,
+          { duration: 8000 },
+        );
+      }
+      if (skippedName) {
+        toast.error(`${skippedName} file(s) skipped — their names contain unsupported characters.`);
+      }
+      if (!accepted.length && !paths.size) return;
+
+      (async () => {
+        try {
+          const res = await api<{ folders: Record<string, string>; created: number; errors: { path: string; reason: string }[] }>(
+            "/api/folders/ensure-paths",
+            { method: "POST", body: JSON.stringify({ parentId: folderId, paths: [...paths] }) },
+          );
+          for (const e of res.errors.slice(0, 3)) toast.error(`${e.path}: ${e.reason}`);
+
+          // 2) Queue each file into its resolved folder.
+          const added: UploadItem[] = [];
+          let skippedMissing = 0;
+          for (const { file, relPath } of accepted) {
+            const segs = relPath.split("/");
+            const dir = segs.slice(0, -1).join("/");
+            const target = res.folders[dir];
+            if (!target) {
+              skippedMissing++;
+              continue;
+            }
+            if (active.some((u) => u.name === file.name && u.size === file.size && u.folderId === target)) {
+              toast.info(`${relPath} is already uploading`);
+              continue;
+            }
+            const key = `${relPath}-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`;
+            added.push({
+              key,
+              name: file.name,
+              size: file.size,
+              progress: 0,
+              status: "queued",
+              attempts: 1,
+              file,
+              folderId: target,
+              relPath,
+            });
+          }
+          if (skippedMissing) {
+            toast.error(`${skippedMissing} file(s) skipped — their folder could not be created.`);
+          }
+          const folderCount = Object.keys(res.folders).length;
+          const rootName = added[0]?.relPath?.split("/")[0] ?? "folder";
+          if (added.length) {
+            toast.success(
+              `Uploading “${rootName}” — ${added.length} file${added.length === 1 ? "" : "s"}, ${folderCount} folder${folderCount === 1 ? "" : "s"}`,
+            );
+            set((s) => ({ uploads: [...added, ...s.uploads] }));
+            for (let i = 0; i < MAX_PARALLEL_UPLOADS; i++) pumpQueue();
+          } else if (folderCount) {
+            toast.info(`Folder structure created — nothing to upload`);
+          }
+        } catch (err) {
+          toast.error(err instanceof Error ? err.message : "Could not create the folder structure");
+        }
+      })();
     },
 
     uploadFromUrl: (url, folderId) => {
