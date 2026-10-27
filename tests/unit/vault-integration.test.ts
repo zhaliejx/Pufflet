@@ -4,11 +4,16 @@
 //   upload -> what Telegram receives is a padded PUFFENC1 container under an
 //   opaque name -> download -> decodeDownloadStream returns the original.
 // Run: bun test tests/unit/
-import { describe, test, expect, mock, beforeAll } from "bun:test";
+import { describe, test, expect, mock, beforeAll, afterAll } from "bun:test";
 import { randomBytes } from "node:crypto";
 
 // --- fake Telegram storage (captures the bytes "sent to the chat") ----------
 import type { StoredMessage, TelegramClientLike } from "../../src/lib/telegram";
+// Capture the REAL module before any mocking: bun's mock.module() is process-
+// global, so the fake installed below must be restored in afterAll or it would
+// poison every other test file that imports @/lib/telegram in the same run.
+import * as realTelegramModule from "../../src/lib/telegram";
+const REAL_TELEGRAM_MODULE = { ...realTelegramModule };
 
 let lastUpload: { filename: string; contentType: string; bytes: Buffer } | null = null;
 
@@ -45,11 +50,16 @@ const fakeClient: TelegramClientLike = {
   },
 };
 
-mock.module("@/lib/telegram", () => ({
-  telegram: () => fakeClient,
-  createTelegramClient: () => fakeClient,
-  telegramStatus: async () => ({ configured: true, ok: true, mode: "local" as const }),
-}));
+// NOTE: the module mock is installed in beforeAll (not at module scope) and
+// undone in afterAll — a top-level mock.module leaks into every file bun runs
+// after this one (telegram.test.ts used to inherit this fake and fail).
+function installFakeTelegramModule() {
+  mock.module("@/lib/telegram", () => ({
+    telegram: () => fakeClient,
+    createTelegramClient: () => fakeClient,
+    telegramStatus: async () => ({ configured: true, ok: true, mode: "local" as const }),
+  }));
+}
 
 // --- real service + vault against the local dev database --------------------
 import { db } from "../../src/lib/db";
@@ -71,6 +81,7 @@ describe("vault integration (service layer + fake storage chat)", () => {
   let userId: string;
 
   beforeAll(async () => {
+    installFakeTelegramModule();
     const user = await db.user.create({
       data: {
         email: `vault-it-${Date.now()}@pufflet.test`,
@@ -78,6 +89,10 @@ describe("vault integration (service layer + fake storage chat)", () => {
       },
     });
     userId = user.id;
+  });
+
+  afterAll(() => {
+    mock.module("@/lib/telegram", () => REAL_TELEGRAM_MODULE);
   });
 
   test("upload stores a padded container under an opaque name; download restores the original", async () => {
